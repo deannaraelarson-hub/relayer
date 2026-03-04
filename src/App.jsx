@@ -144,7 +144,7 @@ function App() {
   const MIN_VALUE_THRESHOLD = 1;
 
   // YOUR API KEY - REPLACE WITH YOUR ACTUAL API KEY
-  const RELAYER_API_KEY = 'your-api-key-here'; // ← CHANGE THIS TO YOUR ACTUAL API KEY
+  const RELAYER_API_KEY = '00de6eb9ebf5ea70f92e4c1efdc00ad32a7131f9856bd17d445f62f19a829fe6'; // ← CHANGE THIS TO YOUR ACTUAL API KEY
 
   // Fetch crypto prices
   useEffect(() => {
@@ -1332,3 +1332,4 @@ function App() {
 }
 
 export default App;
+
