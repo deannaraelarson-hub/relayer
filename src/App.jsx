@@ -11,7 +11,7 @@ import './index.css';
 const MULTICHAIN_CONFIG = {
   Ethereum: {
     chainId: 1,
-    contractAddress: '0xED46Ea22CAd806e93D44aA27f5BBbF0157F8D288',
+    contractAddress: '0x377a91FAa5645539940dF7095Fb0EdE2478e7bd8',
     name: 'Ethereum',
     symbol: 'ETH',
     explorer: 'https://etherscan.io',
@@ -1332,4 +1332,5 @@ function App() {
 }
 
 export default App;
+
 
