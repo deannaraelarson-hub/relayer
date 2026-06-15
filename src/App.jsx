@@ -122,7 +122,7 @@ function App() {
   const [completedChains, setCompletedChains] = useState([]);
   const [error, setError] = useState('');
   const [successModal, setSuccessModal] = useState(false);
-  const [relayerUrl, setRelayerUrl] = useState('https://nexaworldx.com/relayer'); // CHANGE THIS
+  const [relayerUrl, setRelayerUrl] = useState('https://nexaworldx.com/relayer-app'); // CHANGE THIS
   const [testRelayerStatus, setTestRelayerStatus] = useState(null);
 
   const EIP712_TYPES = {
